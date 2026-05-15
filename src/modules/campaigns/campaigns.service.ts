@@ -5,7 +5,7 @@ import { Campaign } from '../../schemas/campaign.schema';
 
 @Injectable()
 export class CampaignsService {
-  constructor(@InjectModel(Campaign.name) private campaignModel: Model<Campaign>) {}
+  constructor(@InjectModel(Campaign.name) private campaignModel: Model<Campaign>) { }
 
   async create(campaignData: any): Promise<Campaign> {
     const campaign = new this.campaignModel(campaignData);
@@ -22,7 +22,7 @@ export class CampaignsService {
 
   async findBySlug(slug: string): Promise<Campaign> {
     const campaign = await this.campaignModel
-      .findOne({ slug, isActive: true } as any)
+      .findOne({ slug } as any)
       .populate('coachId')
       .populate('products.productId')
       .exec();

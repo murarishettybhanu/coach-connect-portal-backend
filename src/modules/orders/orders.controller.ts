@@ -31,6 +31,17 @@ export class OrdersController {
     return this.ordersService.findByCoach(coach._id);
   }
 
+  @Get('pending-approvals')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.COACH)
+  async findPendingApprovals(@Request() req) {
+    if (req.user.role === UserRole.COACH) {
+      const coach = await this.coachesService.findByUserId(req.user.userId || req.user.sub || req.user._id);
+      return this.ordersService.findPendingApprovals(coach._id);
+    }
+    return this.ordersService.findPendingApprovals();
+  }
+
   @Post()
   create(@Body() orderData: any) {
     return this.ordersService.create(orderData);
@@ -62,4 +73,33 @@ export class OrdersController {
   updateStatus(@Param('id') id: string, @Body('status') status: OrderStatus) {
     return this.ordersService.updateStatus(id, status);
   }
+
+  @Patch(':id/approve')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.COACH)
+  async approveOrder(
+    @Param('id') id: string,
+    @Body('note') note: string,
+    @Request() req,
+  ) {
+    const approvedBy = req.user.role === UserRole.ADMIN
+      ? 'admin'
+      : (req.user.userId || req.user.sub || req.user._id);
+    return this.ordersService.approveOrder(id, approvedBy, note);
+  }
+
+  @Patch(':id/reject')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.COACH)
+  async rejectOrder(
+    @Param('id') id: string,
+    @Body('note') note: string,
+    @Request() req,
+  ) {
+    const rejectedBy = req.user.role === UserRole.ADMIN
+      ? 'admin'
+      : (req.user.userId || req.user.sub || req.user._id);
+    return this.ordersService.rejectOrder(id, rejectedBy, note);
+  }
 }
+

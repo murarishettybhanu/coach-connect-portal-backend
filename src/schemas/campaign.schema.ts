@@ -6,6 +6,12 @@ export enum CampaignType {
   STORE_SALE = 'STORE_SALE',
 }
 
+export enum CampaignStatus {
+  ACTIVE = 'ACTIVE',
+  PAUSED = 'PAUSED',
+  STOPPED = 'STOPPED',
+}
+
 @Schema({ timestamps: true })
 export class Campaign extends Document {
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Coach', required: true })
@@ -17,10 +23,12 @@ export class Campaign extends Document {
   @Prop({ required: true, enum: CampaignType })
   type: CampaignType;
 
-  @Prop({ type: [{ 
-    productId: { type: MongooseSchema.Types.ObjectId, ref: 'Product' },
-    retailPrice: Number,
-  }] })
+  @Prop({
+    type: [{
+      productId: { type: MongooseSchema.Types.ObjectId, ref: 'Product' },
+      retailPrice: Number,
+    }]
+  })
   products: {
     productId: MongooseSchema.Types.ObjectId;
     retailPrice?: number; // Only for STORE_SALE
@@ -29,8 +37,8 @@ export class Campaign extends Document {
   @Prop({ required: true, unique: true })
   slug: string; // Used for campaign URL
 
-  @Prop({ default: true })
-  isActive: boolean;
+  @Prop({ type: String, enum: CampaignStatus, default: CampaignStatus.ACTIVE })
+  status: CampaignStatus;
 
   @Prop()
   description?: string;
