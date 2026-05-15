@@ -1,0 +1,77 @@
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document, Schema as MongooseSchema } from 'mongoose';
+
+export enum OrderStatus {
+  NEW = 'NEW',
+  PACKED = 'PACKED',
+  DISPATCHED = 'DISPATCHED',
+  DELIVERED = 'DELIVERED',
+  CANCELLED = 'CANCELLED',
+}
+
+export enum OrderType {
+  WELCOME_KIT = 'WELCOME_KIT',
+  STORE_SALE = 'STORE_SALE',
+}
+
+@Schema({ timestamps: true })
+export class Order extends Document {
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Coach', required: true })
+  coachId: MongooseSchema.Types.ObjectId;
+
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Campaign' })
+  campaignId?: MongooseSchema.Types.ObjectId;
+
+  @Prop({ required: true, enum: OrderType })
+  type: OrderType;
+
+  @Prop({ required: true, enum: OrderStatus, default: OrderStatus.NEW })
+  status: OrderStatus;
+
+  @Prop({ type: [{
+    productId: { type: MongooseSchema.Types.ObjectId, ref: 'Product' },
+    quantity: { type: Number, required: true },
+    baseCost: { type: Number, required: true },
+    retailPrice: { type: Number },
+    commission: { type: Number, default: 0 },
+  }] })
+  items: {
+    productId: MongooseSchema.Types.ObjectId;
+    quantity: number;
+    baseCost: number;
+    retailPrice?: number;
+    commission: number;
+  }[];
+
+  @Prop({ default: 0 })
+  totalCommission: number;
+
+  @Prop({ default: 0 })
+  totalAmount: number;
+
+  @Prop({ default: 0 })
+  totalCost: number;
+
+  @Prop({ required: true, type: Object })
+  shippingAddress: {
+    fullName: string;
+    addressLine1: string;
+    addressLine2?: string;
+    city: string;
+    state: string;
+    pincode: string;
+    phone: string;
+    email: string;
+  };
+
+  @Prop()
+  trackingNumber?: string;
+
+  @Prop()
+  courierName?: string;
+
+  @Prop()
+  paymentReference?: string;
+}
+
+export const OrderSchema = SchemaFactory.createForClass(Order);
