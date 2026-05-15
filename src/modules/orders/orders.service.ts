@@ -1,7 +1,7 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { Order, OrderStatus, OrderType } from '../../schemas/order.schema';
+import { Order, OrderStatus, OrderType, ApprovalStatus } from '../../schemas/order.schema';
 import { Campaign } from '../../schemas/campaign.schema';
 import { ProductsService } from '../products/products.service';
 import { TransactionsService } from '../transactions/transactions.service';
@@ -49,12 +49,16 @@ export class OrdersService {
       }),
     );
 
+    // Welcome Kit orders require approval before entering the pipeline
+    const isWelcomeKit = orderData.type === OrderType.WELCOME_KIT;
+
     const order = new this.orderModel({
       ...orderData,
       items: itemsWithDetails,
       totalCommission,
       totalAmount,
       totalCost,
+      approvalStatus: isWelcomeKit ? ApprovalStatus.PENDING : null,
     });
 
     const savedOrder = await order.save();
@@ -66,9 +70,8 @@ export class OrdersService {
       });
     }
 
-    // Record transactions
+    // Record transactions only for store sales (welcome kits deferred until approval)
     if (orderData.type === OrderType.STORE_SALE && totalCommission > 0) {
-      // Coach earns the margin
       await this.transactionsService.create({
         coachId: orderData.coachId,
         type: TransactionType.COMMISSION,
@@ -79,6 +82,65 @@ export class OrdersService {
     }
 
     return savedOrder;
+  }
+
+  async approveOrder(id: string, approvedBy: string, note?: string): Promise<Order> {
+    const order = await this.orderModel.findById(id).exec();
+    if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
+    if (order.type !== OrderType.WELCOME_KIT) throw new BadRequestException('Only Welcome Kit orders require approval');
+    if (order.approvalStatus !== ApprovalStatus.PENDING) throw new BadRequestException('Order is not pending approval');
+
+    order.approvalStatus = ApprovalStatus.APPROVED;
+    order.approvedBy = approvedBy;
+    order.approvedAt = new Date();
+    if (note) order.approvalNote = note;
+
+    const savedOrder = await order.save();
+
+    // Record commission transaction on approval if applicable
+    if (order.totalCommission > 0) {
+      await this.transactionsService.create({
+        coachId: order.coachId as any,
+        type: TransactionType.COMMISSION,
+        amount: order.totalCommission,
+        orderId: savedOrder._id as any,
+        description: `Commission from Approved Kit Order #${savedOrder._id.toString().slice(-6)}`,
+      });
+    }
+
+    return savedOrder;
+  }
+
+  async rejectOrder(id: string, rejectedBy: string, note?: string): Promise<Order> {
+    const order = await this.orderModel.findById(id).populate('items.productId').exec();
+    if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
+    if (order.type !== OrderType.WELCOME_KIT) throw new BadRequestException('Only Welcome Kit orders require approval');
+    if (order.approvalStatus !== ApprovalStatus.PENDING) throw new BadRequestException('Order is not pending approval');
+
+    order.approvalStatus = ApprovalStatus.REJECTED;
+    order.approvedBy = rejectedBy;
+    order.approvedAt = new Date();
+    order.status = OrderStatus.CANCELLED;
+    if (note) order.approvalNote = note;
+
+    // Restore stock
+    for (const item of order.items) {
+      await this.productsService.update(item.productId as any, {
+        $inc: { stockLevel: item.quantity },
+      });
+    }
+
+    return order.save();
+  }
+
+  async findPendingApprovals(coachId?: string): Promise<Order[]> {
+    const filter: any = { approvalStatus: ApprovalStatus.PENDING };
+    if (coachId) filter.coachId = coachId;
+    return this.orderModel.find(filter)
+      .sort({ createdAt: -1 })
+      .populate('coachId')
+      .populate('items.productId')
+      .exec();
   }
 
   async findAll(): Promise<Order[]> {
@@ -107,3 +169,4 @@ export class OrdersService {
     return updatedOrder;
   }
 }
+

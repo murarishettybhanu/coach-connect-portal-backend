@@ -14,6 +14,12 @@ export enum OrderType {
   STORE_SALE = 'STORE_SALE',
 }
 
+export enum ApprovalStatus {
+  PENDING = 'PENDING',
+  APPROVED = 'APPROVED',
+  REJECTED = 'REJECTED',
+}
+
 @Schema({ timestamps: true })
 export class Order extends Document {
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Coach', required: true })
@@ -27,6 +33,18 @@ export class Order extends Document {
 
   @Prop({ required: true, enum: OrderStatus, default: OrderStatus.NEW })
   status: OrderStatus;
+
+  @Prop({ type: String, enum: ApprovalStatus, default: null })
+  approvalStatus: ApprovalStatus | null;
+
+  @Prop()
+  approvalNote?: string;
+
+  @Prop()
+  approvedBy?: string;
+
+  @Prop()
+  approvedAt?: Date;
 
   @Prop({ type: [{
     productId: { type: MongooseSchema.Types.ObjectId, ref: 'Product' },
@@ -57,11 +75,14 @@ export class Order extends Document {
     fullName: string;
     addressLine1: string;
     addressLine2?: string;
+    landmark?: string;
+    sectorVillage?: string;
     city: string;
+    district?: string;
     state: string;
     pincode: string;
     phone: string;
-    email: string;
+    email?: string;
   };
 
   @Prop()
