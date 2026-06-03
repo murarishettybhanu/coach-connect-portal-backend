@@ -1,0 +1,43 @@
+# Runs on the GCP VM at /opt/shipkit/docker-compose.yml
+# Pulls prebuilt images from GHCR (pushed by GitHub Actions) and fronts them with Caddy.
+services:
+  backend:
+    image: ghcr.io/murarishettybhanu/coach-connect-portal-backend:latest
+    restart: unless-stopped
+    environment:
+      MONGODB_URI: ${MONGODB_URI}
+      JWT_SECRET: ${JWT_SECRET}
+      PORT: "3000"
+    expose:
+      - "3000"
+
+  frontend:
+    image: ghcr.io/murarishettybhanu/coach-connect-portal:latest
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+      HOST: "0.0.0.0"
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # ":80" for IP-only access. Set to your domain (e.g. shipkit.example.com)
+      # to get automatic HTTPS from Caddy.
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+      - frontend
+
+volumes:
+  caddy_data:
+  caddy_config:
