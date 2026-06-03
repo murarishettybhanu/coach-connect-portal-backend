@@ -5,6 +5,7 @@ import {
   Body,
   Patch,
   Param,
+  Query,
   UseGuards,
   Request,
 } from '@nestjs/common';
@@ -15,6 +16,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../schemas/user.schema';
 import { OrderStatus } from '../../schemas/order.schema';
+import { CreateOrderDto } from './dto/create-order.dto';
 
 @Controller('orders')
 export class OrdersController {
@@ -43,7 +45,7 @@ export class OrdersController {
   }
 
   @Post()
-  create(@Body() orderData: any) {
+  create(@Body() orderData: CreateOrderDto) {
     return this.ordersService.create(orderData);
   }
 
@@ -59,6 +61,24 @@ export class OrdersController {
   @Roles(UserRole.COACH)
   findByCoach(@Request() req) {
     return this.findMyOrders(req);
+  }
+
+  @Get('by-coach/:coachId')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  findByCoachPaginated(
+    @Param('coachId') coachId: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.ordersService.findByCoachPaginated(coachId, {
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+      search,
+      status,
+    });
   }
 
   @Get(':id')
@@ -80,12 +100,13 @@ export class OrdersController {
   async approveOrder(
     @Param('id') id: string,
     @Body('note') note: string,
+    @Body('selectedItemIds') selectedItemIds: string[],
     @Request() req,
   ) {
     const approvedBy = req.user.role === UserRole.ADMIN
       ? 'admin'
       : (req.user.userId || req.user.sub || req.user._id);
-    return this.ordersService.approveOrder(id, approvedBy, note);
+    return this.ordersService.approveOrder(id, approvedBy, note, selectedItemIds);
   }
 
   @Patch(':id/reject')

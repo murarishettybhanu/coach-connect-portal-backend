@@ -59,6 +59,11 @@ export class OrdersService {
       totalAmount,
       totalCost,
       approvalStatus: isWelcomeKit ? ApprovalStatus.PENDING : null,
+      statusHistory: [{
+        status: OrderStatus.NEW,
+        at: new Date(),
+        note: isWelcomeKit ? 'Order placed — awaiting approval' : 'Order placed',
+      }],
     });
 
     const savedOrder = await order.save();
@@ -84,16 +89,34 @@ export class OrdersService {
     return savedOrder;
   }
 
-  async approveOrder(id: string, approvedBy: string, note?: string): Promise<Order> {
+  async approveOrder(
+    id: string,
+    approvedBy: string,
+    note?: string,
+    selectedItemIds?: string[],
+  ): Promise<Order> {
     const order = await this.orderModel.findById(id).exec();
     if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
     if (order.type !== OrderType.WELCOME_KIT) throw new BadRequestException('Only Welcome Kit orders require approval');
     if (order.approvalStatus !== ApprovalStatus.PENDING) throw new BadRequestException('Order is not pending approval');
 
+    const now = new Date();
     order.approvalStatus = ApprovalStatus.APPROVED;
     order.approvedBy = approvedBy;
-    order.approvedAt = new Date();
+    order.approvedAt = now;
     if (note) order.approvalNote = note;
+    if (!order.statusHistory) order.statusHistory = [] as any;
+    order.statusHistory.push({ status: 'APPROVED', at: now, note });
+
+    // If a selection was provided, mark items not in the list as unselected
+    // (item is kept in the order, only its `selected` flag changes).
+    if (Array.isArray(selectedItemIds)) {
+      const selectedSet = new Set(selectedItemIds.map(String));
+      order.items.forEach((item: any) => {
+        item.selected = selectedSet.has(item._id.toString());
+      });
+      order.markModified('items');
+    }
 
     const savedOrder = await order.save();
 
@@ -117,11 +140,14 @@ export class OrdersService {
     if (order.type !== OrderType.WELCOME_KIT) throw new BadRequestException('Only Welcome Kit orders require approval');
     if (order.approvalStatus !== ApprovalStatus.PENDING) throw new BadRequestException('Order is not pending approval');
 
+    const now = new Date();
     order.approvalStatus = ApprovalStatus.REJECTED;
     order.approvedBy = rejectedBy;
-    order.approvedAt = new Date();
+    order.approvedAt = now;
     order.status = OrderStatus.CANCELLED;
     if (note) order.approvalNote = note;
+    if (!order.statusHistory) order.statusHistory = [] as any;
+    order.statusHistory.push({ status: 'REJECTED', at: now, note });
 
     // Restore stock
     for (const item of order.items) {
@@ -151,6 +177,68 @@ export class OrdersService {
     return this.orderModel.find({ coachId } as any).sort({ createdAt: -1 }).populate('items.productId').exec();
   }
 
+  async findByCoachPaginated(
+    coachId: string,
+    options: { page?: number; limit?: number; search?: string; status?: string } = {},
+  ): Promise<{
+    data: Order[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  }> {
+    const page = Math.max(1, Number(options.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(options.limit) || 10));
+    const skip = (page - 1) * limit;
+
+    const filter: any = { coachId };
+
+    if (options.status) {
+      filter.status = options.status;
+    }
+
+    // Delivered orders sort by delivery time (newest first); fall back to creation time.
+    const sort: any = options.status === OrderStatus.DELIVERED
+      ? { deliveredAt: -1, createdAt: -1 }
+      : { createdAt: -1 };
+
+    const search = options.search?.trim();
+    if (search) {
+      // Escape regex special chars so user input is treated literally
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      filter.$or = [
+        { 'shippingAddress.fullName': regex },
+        { 'shippingAddress.phone': regex },
+        { 'shippingAddress.email': regex },
+        { 'shippingAddress.city': regex },
+        { 'shippingAddress.state': regex },
+        { status: regex },
+        { type: regex },
+        { trackingNumber: regex },
+      ];
+    }
+
+    const [data, total] = await Promise.all([
+      this.orderModel
+        .find(filter)
+        .sort(sort)
+        .skip(skip)
+        .limit(limit)
+        .populate('items.productId')
+        .exec(),
+      this.orderModel.countDocuments(filter).exec(),
+    ]);
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+    };
+  }
+
   async findOne(id: string): Promise<Order> {
     const order = await this.orderModel.findById(id).populate('items.productId').exec();
     if (!order) {
@@ -160,8 +248,16 @@ export class OrdersService {
   }
 
   async updateStatus(id: string, status: OrderStatus): Promise<Order> {
+    const now = new Date();
+    const update: any = {
+      status,
+      $push: { statusHistory: { status, at: now } },
+    };
+    if (status === OrderStatus.DELIVERED) {
+      update.deliveredAt = now;
+    }
     const updatedOrder = await this.orderModel
-      .findByIdAndUpdate(id, { status }, { new: true })
+      .findByIdAndUpdate(id, update, { new: true })
       .exec();
     if (!updatedOrder) {
       throw new NotFoundException(`Order with ID ${id} not found`);

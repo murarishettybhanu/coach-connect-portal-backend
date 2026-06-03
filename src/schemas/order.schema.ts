@@ -52,6 +52,7 @@ export class Order extends Document {
     baseCost: { type: Number, required: true },
     retailPrice: { type: Number },
     commission: { type: Number, default: 0 },
+    selected: { type: Boolean, default: true }, // unchecked during approval = not fulfilled
   }] })
   items: {
     productId: MongooseSchema.Types.ObjectId;
@@ -59,6 +60,7 @@ export class Order extends Document {
     baseCost: number;
     retailPrice?: number;
     commission: number;
+    selected: boolean;
   }[];
 
   @Prop({ default: 0 })
@@ -93,6 +95,25 @@ export class Order extends Document {
 
   @Prop()
   paymentReference?: string;
+
+  // Set when the order is marked DELIVERED — used to sort the paginated Delivered list.
+  @Prop()
+  deliveredAt?: Date;
+
+  // Audit trail of every status transition, newest appended last.
+  @Prop({
+    type: [{
+      status: { type: String, required: true },
+      at: { type: Date, required: true },
+      note: { type: String },
+    }],
+    default: [],
+  })
+  statusHistory: {
+    status: string;
+    at: Date;
+    note?: string;
+  }[];
 }
 
 export const OrderSchema = SchemaFactory.createForClass(Order);
