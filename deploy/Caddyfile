@@ -1,0 +1,15 @@
+# {$SITE_ADDRESS} defaults to :80 (HTTP, IP access). Set SITE_ADDRESS=your-domain
+# in /opt/shipkit/.env to enable automatic HTTPS.
+{$SITE_ADDRESS} {
+	encode gzip zstd
+
+	# Backend API (NestJS already serves under the /api global prefix)
+	handle /api/* {
+		reverse_proxy backend:3000
+	}
+
+	# Everything else → frontend SSR
+	handle {
+		reverse_proxy frontend:3000
+	}
+}
