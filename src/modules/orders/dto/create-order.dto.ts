@@ -72,6 +72,15 @@ export class OrderItemDto {
   @IsNumber()
   @Min(0)
   retailPrice?: number;
+
+  // Optional per-item customization captured from the customer (TEXT/PHOTO/SIZE).
+  @IsOptional()
+  @IsString()
+  customizationType?: string;
+
+  @IsOptional()
+  @IsString()
+  customizationValue?: string;
 }
 
 export class CreateOrderDto {

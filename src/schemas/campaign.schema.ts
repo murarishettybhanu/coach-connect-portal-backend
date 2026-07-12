@@ -43,6 +43,19 @@ export class Campaign extends Document {
   @Prop()
   description?: string;
 
+  // Optional shipping metadata for the kit/parcel (dimensions in cm, weight in grams).
+  @Prop()
+  length?: number;
+
+  @Prop()
+  breadth?: number;
+
+  @Prop()
+  height?: number;
+
+  @Prop()
+  packageWeight?: number;
+
   @Prop({ default: 0 })
   claims: number;
 }

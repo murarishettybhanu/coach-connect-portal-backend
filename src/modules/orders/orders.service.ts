@@ -239,6 +239,66 @@ export class OrdersService {
     };
   }
 
+  // Same as findByCoachPaginated but across ALL coaches (admin Orders page).
+  async findAllPaginated(
+    options: { page?: number; limit?: number; search?: string; status?: string } = {},
+  ): Promise<{
+    data: Order[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  }> {
+    const page = Math.max(1, Number(options.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(options.limit) || 10));
+    const skip = (page - 1) * limit;
+
+    const filter: any = {};
+    if (options.status) {
+      filter.status = options.status;
+    }
+
+    const sort: any = options.status === OrderStatus.DELIVERED
+      ? { deliveredAt: -1, createdAt: -1 }
+      : { createdAt: -1 };
+
+    const search = options.search?.trim();
+    if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      filter.$or = [
+        { 'shippingAddress.fullName': regex },
+        { 'shippingAddress.phone': regex },
+        { 'shippingAddress.email': regex },
+        { 'shippingAddress.city': regex },
+        { 'shippingAddress.state': regex },
+        { status: regex },
+        { type: regex },
+        { trackingNumber: regex },
+      ];
+    }
+
+    const [data, total] = await Promise.all([
+      this.orderModel
+        .find(filter)
+        .sort(sort)
+        .skip(skip)
+        .limit(limit)
+        .populate('items.productId')
+        .populate({ path: 'coachId', populate: { path: 'userId', select: 'name email' } })
+        .exec(),
+      this.orderModel.countDocuments(filter).exec(),
+    ]);
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+    };
+  }
+
   async findOne(id: string): Promise<Order> {
     const order = await this.orderModel.findById(id).populate('items.productId').exec();
     if (!order) {
@@ -247,7 +307,11 @@ export class OrdersService {
     return order;
   }
 
-  async updateStatus(id: string, status: OrderStatus): Promise<Order> {
+  async updateStatus(
+    id: string,
+    status: OrderStatus,
+    trackingNumber?: string,
+  ): Promise<Order> {
     const now = new Date();
     const update: any = {
       status,
@@ -255,6 +319,10 @@ export class OrdersService {
     };
     if (status === OrderStatus.DELIVERED) {
       update.deliveredAt = now;
+    }
+    // Persist the courier tracking number entered at dispatch time.
+    if (trackingNumber) {
+      update.trackingNumber = trackingNumber.trim();
     }
     const updatedOrder = await this.orderModel
       .findByIdAndUpdate(id, update, { new: true })

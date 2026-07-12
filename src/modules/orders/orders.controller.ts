@@ -56,6 +56,23 @@ export class OrdersController {
     return this.ordersService.findAll();
   }
 
+  @Get('paginated')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  findAllPaginated(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.ordersService.findAllPaginated({
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+      search,
+      status,
+    });
+  }
+
   @Get('coach')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.COACH)
@@ -90,8 +107,12 @@ export class OrdersController {
   @Patch(':id/status')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
-  updateStatus(@Param('id') id: string, @Body('status') status: OrderStatus) {
-    return this.ordersService.updateStatus(id, status);
+  updateStatus(
+    @Param('id') id: string,
+    @Body('status') status: OrderStatus,
+    @Body('trackingNumber') trackingNumber?: string,
+  ) {
+    return this.ordersService.updateStatus(id, status, trackingNumber);
   }
 
   @Patch(':id/approve')
