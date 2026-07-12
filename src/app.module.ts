@@ -10,6 +10,7 @@ import { ProductsModule } from './modules/products/products.module';
 import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { TransactionsModule } from './modules/transactions/transactions.module';
+import { TrackingModule } from './modules/tracking/tracking.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { TransactionsModule } from './modules/transactions/transactions.module';
     CampaignsModule,
     OrdersModule,
     TransactionsModule,
+    TrackingModule,
   ],
   controllers: [AppController],
   providers: [AppService],

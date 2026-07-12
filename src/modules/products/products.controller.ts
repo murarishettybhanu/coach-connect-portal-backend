@@ -27,9 +27,16 @@ export class ProductsController {
   }
 
   @Get()
-  findAll(@Query('coachId') coachId?: string) {
+  findAll(
+    @Query('coachId') coachId?: string,
+    @Query('deleted') deleted?: string,
+  ) {
     if (coachId) {
-      return this.productsService.findByCoach(coachId);
+      // `?deleted=true` returns only the coach's soft-deleted products so the
+      // admin can review and recover them.
+      return deleted === 'true'
+        ? this.productsService.findDeletedByCoach(coachId)
+        : this.productsService.findByCoach(coachId);
     }
     return this.productsService.findAll();
   }
@@ -43,6 +50,12 @@ export class ProductsController {
   @Roles(UserRole.ADMIN)
   update(@Param('id') id: string, @Body() productData: any) {
     return this.productsService.update(id, productData);
+  }
+
+  @Patch(':id/restore')
+  @Roles(UserRole.ADMIN)
+  restore(@Param('id') id: string) {
+    return this.productsService.restore(id);
   }
 
   @Delete(':id')

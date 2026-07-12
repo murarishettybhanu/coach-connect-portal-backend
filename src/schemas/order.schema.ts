@@ -53,6 +53,8 @@ export class Order extends Document {
     retailPrice: { type: Number },
     commission: { type: Number, default: 0 },
     selected: { type: Boolean, default: true }, // unchecked during approval = not fulfilled
+    customizationType: { type: String }, // TEXT | PHOTO | SIZE (from the product)
+    customizationValue: { type: String }, // the customer-provided value
   }] })
   items: {
     productId: MongooseSchema.Types.ObjectId;
@@ -61,6 +63,8 @@ export class Order extends Document {
     retailPrice?: number;
     commission: number;
     selected: boolean;
+    customizationType?: string;
+    customizationValue?: string;
   }[];
 
   @Prop({ default: 0 })

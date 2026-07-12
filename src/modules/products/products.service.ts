@@ -13,11 +13,19 @@ export class ProductsService {
   }
 
   async findAll(): Promise<Product[]> {
-    return this.productModel.find().exec();
+    return this.productModel.find({ isDeleted: { $ne: true } } as any).exec();
   }
 
   async findByCoach(coachId: string): Promise<Product[]> {
-    return this.productModel.find({ coachId } as any).exec();
+    return this.productModel
+      .find({ coachId, isDeleted: { $ne: true } } as any)
+      .exec();
+  }
+
+  async findDeletedByCoach(coachId: string): Promise<Product[]> {
+    return this.productModel
+      .find({ coachId, isDeleted: true } as any)
+      .exec();
   }
 
   async findOne(id: string): Promise<Product> {
@@ -38,10 +46,25 @@ export class ProductsService {
     return updatedProduct;
   }
 
-  async remove(id: string): Promise<void> {
-    const result = await this.productModel.findByIdAndDelete(id).exec();
+  // Soft delete: keep the document, flag it as deleted, and deactivate it so it
+  // drops out of listings while remaining resolvable from historical orders.
+  async remove(id: string): Promise<Product> {
+    const result = await this.productModel
+      .findByIdAndUpdate(id, { isDeleted: true, isActive: false }, { new: true })
+      .exec();
     if (!result) {
       throw new NotFoundException(`Product with ID ${id} not found`);
     }
+    return result;
+  }
+
+  async restore(id: string): Promise<Product> {
+    const result = await this.productModel
+      .findByIdAndUpdate(id, { isDeleted: false, isActive: true }, { new: true })
+      .exec();
+    if (!result) {
+      throw new NotFoundException(`Product with ID ${id} not found`);
+    }
+    return result;
   }
 }
