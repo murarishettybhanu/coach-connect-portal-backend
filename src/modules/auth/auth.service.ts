@@ -27,6 +27,24 @@ export class AuthService {
     return result;
   }
 
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<{ message: string }> {
+    const user = await this.usersService.findOneById(userId);
+    if (!user || !user.password) {
+      throw new UnauthorizedException('User not found');
+    }
+    const matches = await bcrypt.compare(currentPassword, user.password);
+    if (!matches) {
+      throw new UnauthorizedException('Current password is incorrect');
+    }
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await this.usersService.updatePassword(userId, hashed);
+    return { message: 'Password updated successfully' };
+  }
+
   async login(email: string, pass: string): Promise<any> {
     const user = await this.usersService.findOneByEmail(email);
     if (!user || !user.password) {
