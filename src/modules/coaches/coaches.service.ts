@@ -5,7 +5,9 @@ import * as bcrypt from 'bcrypt';
 import { Coach } from '../../schemas/coach.schema';
 import { UsersService } from '../users/users.service';
 import { TransactionsService } from '../transactions/transactions.service';
+import { MailService } from '../mail/mail.service';
 import { UserRole } from '../../schemas/user.schema';
+import { generateStrongPassword } from '../../common/utils/password.util';
 
 @Injectable()
 export class CoachesService {
@@ -13,15 +15,18 @@ export class CoachesService {
     @InjectModel(Coach.name) private coachModel: Model<Coach>,
     private usersService: UsersService,
     private transactionsService: TransactionsService,
+    private mailService: MailService,
   ) {}
 
-  async create(coachData: any): Promise<Coach> {
+  async create(coachData: any): Promise<any> {
     const existingUser = await this.usersService.findOneByEmail(coachData.email);
     if (existingUser) {
       throw new ConflictException('A user with this email already exists');
     }
 
-    const hashedPassword = await bcrypt.hash('coach123', 10);
+    // Strong auto-generated password — emailed to the coach; they change it after first login.
+    const tempPassword = generateStrongPassword(16);
+    const hashedPassword = await bcrypt.hash(tempPassword, 10);
     const user = await this.usersService.create({
       email: coachData.email,
       name: coachData.name,
@@ -38,8 +43,21 @@ export class CoachesService {
       storefrontConfig: {},
       bankingDetails: {},
     });
+    const saved = await coach.save();
 
-    return coach.save();
+    const emailSent = await this.mailService.sendCoachWelcome(
+      coachData.email,
+      coachData.name,
+      tempPassword,
+    );
+
+    // If email couldn't be sent (e.g. SMTP not configured), return the temp
+    // password so the admin can share it manually. Otherwise it's not exposed.
+    return {
+      ...saved.toObject(),
+      emailSent,
+      ...(emailSent ? {} : { tempPassword }),
+    };
   }
 
   async findAll(): Promise<any[]> {
