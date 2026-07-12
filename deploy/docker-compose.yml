@@ -34,9 +34,8 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    depends_on:
-      - backend
-      - frontend
+    # No depends_on: backend & frontend deploy independently (each CI job only
+    # has access to its own GHCR image). Caddy proxies whichever is up.
 
 volumes:
   caddy_data:
