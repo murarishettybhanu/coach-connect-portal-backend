@@ -11,6 +11,7 @@ import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { TransactionsModule } from './modules/transactions/transactions.module';
 import { TrackingModule } from './modules/tracking/tracking.module';
+import { UploadsModule } from './modules/uploads/uploads.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { TrackingModule } from './modules/tracking/tracking.module';
     OrdersModule,
     TransactionsModule,
     TrackingModule,
+    UploadsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

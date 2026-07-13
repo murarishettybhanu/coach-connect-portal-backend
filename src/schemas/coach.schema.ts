@@ -35,6 +35,9 @@ export class Coach extends Document {
   @Prop()
   profileImage?: string;
 
+  @Prop()
+  logoUrl?: string; // Brand logo
+
   @Prop({ default: 0 })
   walletBalance: number;
 

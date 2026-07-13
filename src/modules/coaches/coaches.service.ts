@@ -38,6 +38,7 @@ export class CoachesService {
       userId: user._id,
       username: coachData.username,
       brand: coachData.brand || coachData.name,
+      logoUrl: coachData.logoUrl || undefined,
       walletBalance: 0,
       isActive: true,
       storefrontConfig: {},
