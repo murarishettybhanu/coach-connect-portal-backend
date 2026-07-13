@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -31,6 +32,15 @@ export class ProductsService {
       .exec();
   }
 
+  // Public storefront listing: only published (isActive), non-deleted products,
+  // and without exposing the internal production cost.
+  async findActiveByCoach(coachId: string): Promise<Product[]> {
+    return this.productModel
+      .find({ coachId, isActive: true, isDeleted: { $ne: true } } as any)
+      .select('-baseProductionCost')
+      .exec();
+  }
+
   async findDeletedByCoach(coachId: string): Promise<Product[]> {
     return this.productModel
       .find({ coachId, isDeleted: true } as any)
@@ -53,6 +63,27 @@ export class ProductsService {
       throw new NotFoundException(`Product with ID ${id} not found`);
     }
     return updatedProduct;
+  }
+
+  // Coach-facing store update: only retailPrice / isActive, and only on the
+  // coach's own products. `requesterCoachId` is passed for COACH callers so we
+  // can enforce ownership; ADMIN callers pass undefined and skip the check.
+  async updateStoreSettings(
+    id: string,
+    data: { retailPrice?: number; isActive?: boolean },
+    requesterCoachId?: string,
+  ): Promise<Product> {
+    const product = await this.findOne(id);
+    if (
+      requesterCoachId &&
+      product.coachId?.toString() !== requesterCoachId.toString()
+    ) {
+      throw new ForbiddenException('You can only update your own products.');
+    }
+    if (data.retailPrice !== undefined) product.retailPrice = data.retailPrice;
+    if (data.isActive !== undefined) product.isActive = data.isActive;
+    await product.save();
+    return product;
   }
 
   // Soft delete: keep the document, flag it as deleted, and deactivate it so it
