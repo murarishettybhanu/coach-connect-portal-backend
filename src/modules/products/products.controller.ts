@@ -8,12 +8,14 @@ import {
   Delete,
   UseGuards,
   Query,
+  Request,
 } from '@nestjs/common';
 import { ProductsService } from './products.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../schemas/user.schema';
+import { AddInventoryDto, RemoveInventoryDto } from './dto/inventory.dto';
 
 @Controller('products')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -56,6 +58,42 @@ export class ProductsController {
   @Roles(UserRole.ADMIN)
   restore(@Param('id') id: string) {
     return this.productsService.restore(id);
+  }
+
+  @Patch(':id/inventory/add')
+  @Roles(UserRole.ADMIN)
+  addInventory(
+    @Param('id') id: string,
+    @Body() dto: AddInventoryDto,
+    @Request() req: any,
+  ) {
+    return this.productsService.addInventory(
+      id,
+      dto.quantity,
+      dto.reason,
+      req.user?._id,
+    );
+  }
+
+  @Patch(':id/inventory/remove')
+  @Roles(UserRole.ADMIN)
+  removeInventory(
+    @Param('id') id: string,
+    @Body() dto: RemoveInventoryDto,
+    @Request() req: any,
+  ) {
+    return this.productsService.removeInventory(
+      id,
+      dto.quantity,
+      dto.reason,
+      req.user?._id,
+    );
+  }
+
+  @Get(':id/inventory/logs')
+  @Roles(UserRole.ADMIN)
+  inventoryLogs(@Param('id') id: string) {
+    return this.productsService.getInventoryLogs(id);
   }
 
   @Delete(':id')
