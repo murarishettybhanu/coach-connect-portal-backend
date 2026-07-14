@@ -12,6 +12,8 @@ import { OrdersModule } from './modules/orders/orders.module';
 import { TransactionsModule } from './modules/transactions/transactions.module';
 import { TrackingModule } from './modules/tracking/tracking.module';
 import { UploadsModule } from './modules/uploads/uploads.module';
+import { CatalogModule } from './modules/catalog/catalog.module';
+import { CoachKitsModule } from './modules/coach-kits/coach-kits.module';
 
 @Module({
   imports: [
@@ -34,6 +36,8 @@ import { UploadsModule } from './modules/uploads/uploads.module';
     TransactionsModule,
     TrackingModule,
     UploadsModule,
+    CatalogModule,
+    CoachKitsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
