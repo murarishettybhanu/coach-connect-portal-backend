@@ -51,7 +51,7 @@ export class MailService {
   }
 
   /** Sends a coach their new login credentials. Returns true if actually sent. */
-  async sendCoachWelcome(
+  async sendTribeWelcome(
     email: string,
     name: string,
     password: string,
@@ -60,8 +60,8 @@ export class MailService {
     const loginUrl = this.loginUrl;
     const html = `
       <div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;color:#0f172a">
-        <h2 style="margin:0 0 8px">Welcome to Tribe Merchandise, ${escapeHtml(name || 'Coach')}!</h2>
-        <p style="color:#334155">Your coach account has been created. Here are your login details:</p>
+        <h2 style="margin:0 0 8px">Welcome to Tribe Merchandise, ${escapeHtml(name || 'Tribe')}!</h2>
+        <p style="color:#334155">Your Tribe account has been created. Here are your login details:</p>
         <table style="border-collapse:collapse;margin:16px 0">
           <tr><td style="padding:4px 12px 4px 0;color:#64748b">Email</td><td style="font-weight:700">${escapeHtml(email)}</td></tr>
           <tr><td style="padding:4px 12px 4px 0;color:#64748b">Temporary password</td><td style="font-family:monospace;font-weight:700">${escapeHtml(password)}</td></tr>
@@ -73,8 +73,8 @@ export class MailService {
         <p style="color:#94a3b8;font-size:12px;margin-top:24px">If you didn't expect this email, you can ignore it.</p>
       </div>`;
     const text =
-      `Welcome to Tribe Merchandise, ${name || 'Coach'}!\n\n` +
-      `Your coach account is ready.\n` +
+      `Welcome to Tribe Merchandise, ${name || 'Tribe'}!\n\n` +
+      `Your Tribe account is ready.\n` +
       `Email: ${email}\n` +
       `Temporary password: ${password}\n\n` +
       `Log in: ${loginUrl}\n\n` +
@@ -84,7 +84,7 @@ export class MailService {
       await this.transporter.sendMail({
         from: this.from,
         to: email,
-        subject: 'Your Tribe Merchandise coach account',
+        subject: 'Your Tribe Merchandise account',
         text,
         html,
       });

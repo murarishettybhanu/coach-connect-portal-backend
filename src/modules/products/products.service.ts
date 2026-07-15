@@ -65,8 +65,8 @@ export class ProductsService {
     return updatedProduct;
   }
 
-  // Coach-facing store update: only retailPrice / isActive, and only on the
-  // coach's own products. `requesterCoachId` is passed for COACH callers so we
+  // Tribe-facing store update: only retailPrice / isActive, and only on the
+  // coach's own products. `requesterCoachId` is passed for TRIBE callers so we
   // can enforce ownership; ADMIN callers pass undefined and skip the check.
   async updateStoreSettings(
     id: string,

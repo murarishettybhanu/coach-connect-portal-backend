@@ -39,7 +39,7 @@ export class GuestEstimationDto {
   items?: LineItemDto[];
 }
 
-export class CoachQuoteDto {
+export class TribeQuoteDto {
   @IsOptional()
   @IsMongoId()
   kitId?: string;

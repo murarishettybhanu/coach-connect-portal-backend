@@ -3,7 +3,7 @@ import { Document, Schema as MongooseSchema } from 'mongoose';
 
 export enum RequestSource {
   GUEST = 'GUEST', // "Get Estimation" — logged-out visitor (name + mobile)
-  COACH = 'COACH', // Quote request raised by a logged-in coach
+  TRIBE = 'TRIBE', // Quote request raised by a logged-in coach
 }
 
 export enum RequestStatus {
@@ -28,8 +28,8 @@ export class QuoteRequest extends Document {
   @Prop()
   mobile?: string;
 
-  // Coach reference (source = COACH)
-  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Coach' })
+  // Tribe reference (source = TRIBE)
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Tribe' })
   coachId?: MongooseSchema.Types.ObjectId;
 
   @Prop()

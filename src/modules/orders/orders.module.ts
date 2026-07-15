@@ -6,7 +6,7 @@ import { Order, OrderSchema } from '../../schemas/order.schema';
 import { Campaign, CampaignSchema } from '../../schemas/campaign.schema';
 import { ProductsModule } from '../products/products.module';
 import { TransactionsModule } from '../transactions/transactions.module';
-import { CoachesModule } from '../coaches/coaches.module';
+import { TribesModule } from '../tribes/tribes.module';
 
 @Module({
   imports: [
@@ -16,7 +16,7 @@ import { CoachesModule } from '../coaches/coaches.module';
     ]),
     ProductsModule,
     TransactionsModule,
-    CoachesModule,
+    TribesModule,
   ],
   providers: [OrdersService],
   controllers: [OrdersController],

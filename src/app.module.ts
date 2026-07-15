@@ -5,7 +5,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { UsersModule } from './modules/users/users.module';
 import { AuthModule } from './modules/auth/auth.module';
-import { CoachesModule } from './modules/coaches/coaches.module';
+import { TribesModule } from './modules/tribes/tribes.module';
 import { ProductsModule } from './modules/products/products.module';
 import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { OrdersModule } from './modules/orders/orders.module';
@@ -13,7 +13,7 @@ import { TransactionsModule } from './modules/transactions/transactions.module';
 import { TrackingModule } from './modules/tracking/tracking.module';
 import { UploadsModule } from './modules/uploads/uploads.module';
 import { CatalogModule } from './modules/catalog/catalog.module';
-import { CoachKitsModule } from './modules/coach-kits/coach-kits.module';
+import { TribeKitsModule } from './modules/tribe-kits/tribe-kits.module';
 
 @Module({
   imports: [
@@ -29,7 +29,7 @@ import { CoachKitsModule } from './modules/coach-kits/coach-kits.module';
     }),
     UsersModule,
     AuthModule,
-    CoachesModule,
+    TribesModule,
     ProductsModule,
     CampaignsModule,
     OrdersModule,
@@ -37,7 +37,7 @@ import { CoachKitsModule } from './modules/coach-kits/coach-kits.module';
     TrackingModule,
     UploadsModule,
     CatalogModule,
-    CoachKitsModule,
+    TribeKitsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

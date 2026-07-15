@@ -16,7 +16,7 @@ import { AdminCatalogController } from './admin-catalog.controller';
 import { PublicCatalogController } from './public-catalog.controller';
 import { EstimationsController } from './estimations.controller';
 import { RequestsController } from './requests.controller';
-import { CoachesModule } from '../coaches/coaches.module';
+import { TribesModule } from '../tribes/tribes.module';
 
 @Module({
   imports: [
@@ -26,7 +26,7 @@ import { CoachesModule } from '../coaches/coaches.module';
       { name: Kit.name, schema: KitSchema },
       { name: QuoteRequest.name, schema: QuoteRequestSchema },
     ]),
-    CoachesModule,
+    TribesModule,
   ],
   providers: [CatalogService, QuoteRequestsService],
   controllers: [

@@ -17,14 +17,14 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../schemas/user.schema';
 import { AddInventoryDto, RemoveInventoryDto } from './dto/inventory.dto';
 import { UpdateStoreSettingsDto } from './dto/update-store-settings.dto';
-import { CoachesService } from '../coaches/coaches.service';
+import { TribesService } from '../tribes/tribes.service';
 
 @Controller('products')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class ProductsController {
   constructor(
     private readonly productsService: ProductsService,
-    private readonly coachesService: CoachesService,
+    private readonly tribesService: TribesService,
   ) {}
 
   @Post()
@@ -62,15 +62,15 @@ export class ProductsController {
   // Coaches (and admins) can set retail price / publish state on the store.
   // Coaches are restricted to their own products by ownership check.
   @Patch(':id/store-settings')
-  @Roles(UserRole.ADMIN, UserRole.COACH)
+  @Roles(UserRole.ADMIN, UserRole.TRIBE)
   async updateStoreSettings(
     @Param('id') id: string,
     @Body() dto: UpdateStoreSettingsDto,
     @Request() req: any,
   ) {
     let coachId: string | undefined;
-    if (req.user.role === UserRole.COACH) {
-      const coach = await this.coachesService.findByUserId(
+    if (req.user.role === UserRole.TRIBE) {
+      const coach = await this.tribesService.findByUserId(
         req.user.userId || req.user.sub || req.user._id,
       );
       coachId = coach._id;

@@ -9,7 +9,7 @@ export enum TransactionType {
 
 @Schema({ timestamps: true })
 export class Transaction extends Document {
-  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Coach', required: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Tribe', required: true })
   coachId: MongooseSchema.Types.ObjectId;
 
   @Prop({ required: true, enum: TransactionType })
