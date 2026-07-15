@@ -8,7 +8,7 @@ import {
   InventoryLog,
   InventoryLogSchema,
 } from '../../schemas/inventory-log.schema';
-import { CoachesModule } from '../coaches/coaches.module';
+import { TribesModule } from '../tribes/tribes.module';
 
 @Module({
   imports: [
@@ -16,7 +16,7 @@ import { CoachesModule } from '../coaches/coaches.module';
       { name: Product.name, schema: ProductSchema },
       { name: InventoryLog.name, schema: InventoryLogSchema },
     ]),
-    CoachesModule,
+    TribesModule,
   ],
   providers: [ProductsService],
   controllers: [ProductsController, PublicProductsController],

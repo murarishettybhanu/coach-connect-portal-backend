@@ -12,7 +12,7 @@ export class TrackingController {
 
   // GET /api/tracking/:consignmentNumber — live India Post status via myspeedpost
   @Get(':consignmentNumber')
-  @Roles(UserRole.ADMIN, UserRole.COACH)
+  @Roles(UserRole.ADMIN, UserRole.TRIBE)
   track(@Param('consignmentNumber') consignmentNumber: string) {
     return this.trackingService.track(consignmentNumber);
   }

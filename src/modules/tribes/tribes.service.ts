@@ -2,7 +2,7 @@ import { Injectable, NotFoundException, ConflictException } from '@nestjs/common
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
-import { Coach } from '../../schemas/coach.schema';
+import { Tribe } from '../../schemas/tribe.schema';
 import { UsersService } from '../users/users.service';
 import { TransactionsService } from '../transactions/transactions.service';
 import { MailService } from '../mail/mail.service';
@@ -10,16 +10,16 @@ import { UserRole } from '../../schemas/user.schema';
 import { generateStrongPassword } from '../../common/utils/password.util';
 
 @Injectable()
-export class CoachesService {
+export class TribesService {
   constructor(
-    @InjectModel(Coach.name) private coachModel: Model<Coach>,
+    @InjectModel(Tribe.name) private tribeModel: Model<Tribe>,
     private usersService: UsersService,
     private transactionsService: TransactionsService,
     private mailService: MailService,
   ) {}
 
-  async create(coachData: any): Promise<any> {
-    const existingUser = await this.usersService.findOneByEmail(coachData.email);
+  async create(tribeData: any): Promise<any> {
+    const existingUser = await this.usersService.findOneByEmail(tribeData.email);
     if (existingUser) {
       throw new ConflictException('A user with this email already exists');
     }
@@ -28,17 +28,17 @@ export class CoachesService {
     const tempPassword = generateStrongPassword(16);
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
     const user = await this.usersService.create({
-      email: coachData.email,
-      name: coachData.name,
+      email: tribeData.email,
+      name: tribeData.name,
       password: hashedPassword,
-      role: UserRole.COACH,
+      role: UserRole.TRIBE,
     });
 
-    const coach = new this.coachModel({
+    const coach = new this.tribeModel({
       userId: user._id,
-      username: coachData.username,
-      brand: coachData.brand || coachData.name,
-      logoUrl: coachData.logoUrl || undefined,
+      username: tribeData.username,
+      brand: tribeData.brand || tribeData.name,
+      logoUrl: tribeData.logoUrl || undefined,
       walletBalance: 0,
       isActive: true,
       storefrontConfig: {},
@@ -46,9 +46,9 @@ export class CoachesService {
     });
     const saved = await coach.save();
 
-    const emailSent = await this.mailService.sendCoachWelcome(
-      coachData.email,
-      coachData.name,
+    const emailSent = await this.mailService.sendTribeWelcome(
+      tribeData.email,
+      tribeData.name,
       tempPassword,
     );
 
@@ -62,7 +62,7 @@ export class CoachesService {
   }
 
   async findAll(): Promise<any[]> {
-    const coaches = await this.coachModel.find().populate('userId', '-password').exec();
+    const coaches = await this.tribeModel.find().populate('userId', '-password').exec();
     return Promise.all(coaches.map(async (c) => {
       const balance = await this.transactionsService.getBalance(c._id as any);
       const coachObj = c.toObject();
@@ -71,9 +71,9 @@ export class CoachesService {
   }
 
   async findByUserId(userId: string): Promise<any> {
-    const coach = await this.coachModel.findOne({ userId } as any).exec();
+    const coach = await this.tribeModel.findOne({ userId } as any).exec();
     if (!coach) {
-      throw new NotFoundException(`Coach profile for user ${userId} not found`);
+      throw new NotFoundException(`Tribe profile for user ${userId} not found`);
     }
     const balance = await this.transactionsService.getBalance(coach._id as any);
     const coachObj = coach.toObject();
@@ -81,9 +81,9 @@ export class CoachesService {
   }
 
   async findOne(id: string): Promise<any> {
-    const coach = await this.coachModel.findById(id).populate('userId', '-password').exec();
+    const coach = await this.tribeModel.findById(id).populate('userId', '-password').exec();
     if (!coach) {
-      throw new NotFoundException(`Coach with ID ${id} not found`);
+      throw new NotFoundException(`Tribe with ID ${id} not found`);
     }
     const balance = await this.transactionsService.getBalance(coach._id as any);
     const coachObj = coach.toObject();
@@ -91,21 +91,21 @@ export class CoachesService {
   }
 
   async findByUsername(username: string): Promise<any> {
-    const coach = await this.coachModel.findOne({ username }).exec();
+    const coach = await this.tribeModel.findOne({ username }).exec();
     if (!coach) {
-      throw new NotFoundException(`Coach with username ${username} not found`);
+      throw new NotFoundException(`Tribe with username ${username} not found`);
     }
     const balance = await this.transactionsService.getBalance(coach._id as any);
     const coachObj = coach.toObject();
     return { ...coachObj, walletBalance: balance };
   }
 
-  async update(id: string, coachData: any): Promise<Coach> {
-    const updatedCoach = await this.coachModel
-      .findByIdAndUpdate(id, coachData, { new: true })
+  async update(id: string, tribeData: any): Promise<Tribe> {
+    const updatedCoach = await this.tribeModel
+      .findByIdAndUpdate(id, tribeData, { new: true })
       .exec();
     if (!updatedCoach) {
-      throw new NotFoundException(`Coach with ID ${id} not found`);
+      throw new NotFoundException(`Tribe with ID ${id} not found`);
     }
     return updatedCoach;
   }

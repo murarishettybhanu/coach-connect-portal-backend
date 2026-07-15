@@ -7,7 +7,7 @@ import {
   Request,
 } from '@nestjs/common';
 import { TransactionsService } from './transactions.service';
-import { CoachesService } from '../coaches/coaches.service';
+import { TribesService } from '../tribes/tribes.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -18,20 +18,20 @@ import { UserRole } from '../../schemas/user.schema';
 export class TransactionsController {
   constructor(
     private readonly transactionsService: TransactionsService,
-    private readonly coachesService: CoachesService,
+    private readonly tribesService: TribesService,
   ) {}
 
   @Get('me')
-  @Roles(UserRole.COACH)
+  @Roles(UserRole.TRIBE)
   async findMyTransactions(@Request() req) {
-    const coach = await this.coachesService.findByUserId(req.user.userId || req.user.sub || req.user._id);
+    const coach = await this.tribesService.findByUserId(req.user.userId || req.user.sub || req.user._id);
     return this.transactionsService.findByCoach(coach._id);
   }
 
   @Get('my-balance')
-  @Roles(UserRole.COACH)
+  @Roles(UserRole.TRIBE)
   async getMyBalance(@Request() req) {
-    const coach = await this.coachesService.findByUserId(req.user.userId || req.user.sub || req.user._id);
+    const coach = await this.tribesService.findByUserId(req.user.userId || req.user.sub || req.user._id);
     const balance = await this.transactionsService.getBalance(coach._id);
     return { balance };
   }
@@ -51,14 +51,14 @@ export class TransactionsController {
     return this.transactionsService.findAll();
   }
 
-  @Get('coach')
-  @Roles(UserRole.COACH)
+  @Get('tribe')
+  @Roles(UserRole.TRIBE)
   findByCoach(@Request() req) {
     return this.findMyTransactions(req);
   }
 
   @Get('balance')
-  @Roles(UserRole.COACH)
+  @Roles(UserRole.TRIBE)
   async getBalance(@Request() req) {
     return this.getMyBalance(req);
   }

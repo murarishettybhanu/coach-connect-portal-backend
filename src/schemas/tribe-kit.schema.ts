@@ -5,8 +5,8 @@ import { Document, Schema as MongooseSchema } from 'mongoose';
 // quantities). Buildable inventory is derived live from product stock, not
 // stored. Distinct from the master-catalog `Kit` (which bundles CatalogProduct).
 @Schema({ timestamps: true })
-export class CoachKit extends Document {
-  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Coach', required: true })
+export class TribeKit extends Document {
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Tribe', required: true })
   coachId: MongooseSchema.Types.ObjectId;
 
   @Prop({ required: true })
@@ -36,4 +36,4 @@ export class CoachKit extends Document {
   isDeleted: boolean;
 }
 
-export const CoachKitSchema = SchemaFactory.createForClass(CoachKit);
+export const TribeKitSchema = SchemaFactory.createForClass(TribeKit);

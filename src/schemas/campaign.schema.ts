@@ -14,7 +14,7 @@ export enum CampaignStatus {
 
 @Schema({ timestamps: true })
 export class Campaign extends Document {
-  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Coach', required: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Tribe', required: true })
   coachId: MongooseSchema.Types.ObjectId;
 
   @Prop({ required: true })

@@ -1,12 +1,12 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { CoachKit } from '../../schemas/coach-kit.schema';
+import { TribeKit } from '../../schemas/tribe-kit.schema';
 
 @Injectable()
-export class CoachKitsService {
+export class TribeKitsService {
   constructor(
-    @InjectModel(CoachKit.name) private kitModel: Model<CoachKit>,
+    @InjectModel(TribeKit.name) private kitModel: Model<TribeKit>,
   ) {}
 
   create(data: any) {

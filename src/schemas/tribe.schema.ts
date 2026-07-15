@@ -2,7 +2,7 @@ import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Schema as MongooseSchema } from 'mongoose';
 
 @Schema({ timestamps: true })
-export class Coach extends Document {
+export class Tribe extends Document {
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'User', required: true, unique: true })
   userId: MongooseSchema.Types.ObjectId;
 
@@ -60,4 +60,4 @@ export class Coach extends Document {
   isActive: boolean;
 }
 
-export const CoachSchema = SchemaFactory.createForClass(Coach);
+export const TribeSchema = SchemaFactory.createForClass(Tribe);

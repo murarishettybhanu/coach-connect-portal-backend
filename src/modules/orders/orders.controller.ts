@@ -10,7 +10,7 @@ import {
   Request,
 } from '@nestjs/common';
 import { OrdersService } from './orders.service';
-import { CoachesService } from '../coaches/coaches.service';
+import { TribesService } from '../tribes/tribes.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -22,23 +22,23 @@ import { CreateOrderDto } from './dto/create-order.dto';
 export class OrdersController {
   constructor(
     private readonly ordersService: OrdersService,
-    private readonly coachesService: CoachesService,
+    private readonly tribesService: TribesService,
   ) {}
 
   @Get('me')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.COACH)
+  @Roles(UserRole.TRIBE)
   async findMyOrders(@Request() req) {
-    const coach = await this.coachesService.findByUserId(req.user.userId || req.user.sub || req.user._id);
+    const coach = await this.tribesService.findByUserId(req.user.userId || req.user.sub || req.user._id);
     return this.ordersService.findByCoach(coach._id);
   }
 
   @Get('pending-approvals')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.COACH)
+  @Roles(UserRole.ADMIN, UserRole.TRIBE)
   async findPendingApprovals(@Request() req) {
-    if (req.user.role === UserRole.COACH) {
-      const coach = await this.coachesService.findByUserId(req.user.userId || req.user.sub || req.user._id);
+    if (req.user.role === UserRole.TRIBE) {
+      const coach = await this.tribesService.findByUserId(req.user.userId || req.user.sub || req.user._id);
       return this.ordersService.findPendingApprovals(coach._id);
     }
     return this.ordersService.findPendingApprovals();
@@ -73,9 +73,9 @@ export class OrdersController {
     });
   }
 
-  @Get('coach')
+  @Get('tribe')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.COACH)
+  @Roles(UserRole.TRIBE)
   findByCoach(@Request() req) {
     return this.findMyOrders(req);
   }
@@ -117,7 +117,7 @@ export class OrdersController {
 
   @Patch(':id/approve')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.COACH)
+  @Roles(UserRole.ADMIN, UserRole.TRIBE)
   async approveOrder(
     @Param('id') id: string,
     @Body('note') note: string,
@@ -132,7 +132,7 @@ export class OrdersController {
 
   @Patch(':id/reject')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.COACH)
+  @Roles(UserRole.ADMIN, UserRole.TRIBE)
   async rejectOrder(
     @Param('id') id: string,
     @Body('note') note: string,

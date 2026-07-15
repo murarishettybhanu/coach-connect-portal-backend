@@ -66,7 +66,7 @@ export class QuoteRequestsService {
     } as any);
   }
 
-  async createCoachQuote(
+  async createTribeQuote(
     coach: { _id: any; name?: string; brand?: string },
     input: {
       kitId?: string;
@@ -76,7 +76,7 @@ export class QuoteRequestsService {
   ) {
     const { items, total, kitId, kitName } = await this.resolveLines(input);
     return this.requestModel.create({
-      source: RequestSource.COACH,
+      source: RequestSource.TRIBE,
       coachId: coach._id,
       coachName: coach.name || coach.brand,
       kitId,

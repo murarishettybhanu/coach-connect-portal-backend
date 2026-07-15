@@ -8,7 +8,7 @@ export class InventoryLog extends Document {
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Product', required: true })
   productId: MongooseSchema.Types.ObjectId;
 
-  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Coach' })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Tribe' })
   coachId?: MongooseSchema.Types.ObjectId;
 
   @Prop({ enum: ['ADD', 'REMOVE'], required: true })
