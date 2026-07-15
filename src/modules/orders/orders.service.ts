@@ -170,11 +170,11 @@ export class OrdersService {
   }
 
   async findAll(): Promise<Order[]> {
-    return this.orderModel.find().sort({ createdAt: -1 }).populate('coachId').populate('items.productId').exec();
+    return this.orderModel.find().sort({ createdAt: -1 }).populate('coachId').populate('items.productId').populate('campaignId', 'name type').exec();
   }
 
   async findByCoach(coachId: string): Promise<Order[]> {
-    return this.orderModel.find({ coachId } as any).sort({ createdAt: -1 }).populate('items.productId').exec();
+    return this.orderModel.find({ coachId } as any).sort({ createdAt: -1 }).populate('items.productId').populate('campaignId', 'name type').exec();
   }
 
   async findByCoachPaginated(
@@ -226,6 +226,7 @@ export class OrdersService {
         .skip(skip)
         .limit(limit)
         .populate('items.productId')
+        .populate('campaignId', 'name type')
         .exec(),
       this.orderModel.countDocuments(filter).exec(),
     ]);
@@ -286,6 +287,7 @@ export class OrdersService {
         .limit(limit)
         .populate('items.productId')
         .populate({ path: 'coachId', populate: { path: 'userId', select: 'name email' } })
+        .populate('campaignId', 'name type')
         .exec(),
       this.orderModel.countDocuments(filter).exec(),
     ]);
