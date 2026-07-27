@@ -3,6 +3,15 @@
 {$SITE_ADDRESS} {
 	encode gzip zstd
 
+	# Security headers (HSTS only takes effect over HTTPS; ignored on plain HTTP).
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
 	# Backend API (NestJS already serves under the /api global prefix)
 	handle /api/* {
 		reverse_proxy backend:3000
