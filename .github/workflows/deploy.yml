@@ -30,8 +30,6 @@ jobs:
         with:
           context: .
           push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           # Immutable SHA tag (for rollback/audit) + moving :latest.
           tags: |
             ghcr.io/${{ github.repository }}:latest

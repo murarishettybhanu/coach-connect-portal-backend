@@ -9,4 +9,10 @@ export class AppController {
   getHello(): string {
     return this.appService.getHello();
   }
+
+  // Liveness/readiness probe (also reachable externally via Caddy /api/*).
+  @Get('health')
+  getHealth() {
+    return { status: 'ok' };
+  }
 }
