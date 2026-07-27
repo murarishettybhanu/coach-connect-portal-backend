@@ -28,16 +28,9 @@ services:
     expose:
       - "3000"
 
-  frontend:
-    image: ghcr.io/murarishettybhanu/coach-connect-portal:latest
-    restart: unless-stopped
-    environment:
-      PORT: "3000"
-      HOST: "0.0.0.0"
-      NODE_OPTIONS: "--max-old-space-size=320"
-    mem_limit: 400m
-    expose:
-      - "3000"
+  # Frontend moved to Render (served on the apex/www domains). This box runs
+  # backend + caddy only. To roll back: point apex DNS back to this IP and
+  # re-add a frontend service + apex handle to the Caddyfile.
 
   caddy:
     image: caddy:2-alpine
