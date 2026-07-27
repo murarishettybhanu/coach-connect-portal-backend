@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Transaction, TransactionType } from '../../schemas/transaction.schema';
@@ -12,6 +12,28 @@ export class TransactionsService {
   async create(transactionData: any): Promise<Transaction> {
     const transaction = new this.transactionModel(transactionData);
     return transaction.save();
+  }
+
+  // Payout with a balance guard so an admin can't drive a tribe negative.
+  async createPayout(data: {
+    coachId: string;
+    amount: number;
+    utrReference?: string;
+    description?: string;
+  }): Promise<Transaction> {
+    const balance = await this.getBalance(data.coachId);
+    if (data.amount > balance) {
+      throw new BadRequestException(
+        `Payout of ${data.amount} exceeds available balance of ${balance}`,
+      );
+    }
+    return this.create({
+      coachId: data.coachId,
+      type: TransactionType.PAYOUT,
+      amount: data.amount,
+      utrReference: data.utrReference,
+      description: data.description || 'Payout',
+    });
   }
 
   async findAll(): Promise<Transaction[]> {

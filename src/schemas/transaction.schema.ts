@@ -32,3 +32,5 @@ export class Transaction extends Document {
 }
 
 export const TransactionSchema = SchemaFactory.createForClass(Transaction);
+
+TransactionSchema.index({ coachId: 1, createdAt: -1 });

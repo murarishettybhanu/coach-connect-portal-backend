@@ -61,3 +61,5 @@ export class Campaign extends Document {
 }
 
 export const CampaignSchema = SchemaFactory.createForClass(Campaign);
+
+CampaignSchema.index({ coachId: 1 });

@@ -37,3 +37,5 @@ export class TribeKit extends Document {
 }
 
 export const TribeKitSchema = SchemaFactory.createForClass(TribeKit);
+
+TribeKitSchema.index({ coachId: 1, isDeleted: 1 });

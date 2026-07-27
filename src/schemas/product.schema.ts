@@ -43,3 +43,5 @@ export class Product extends Document {
 }
 
 export const ProductSchema = SchemaFactory.createForClass(Product);
+
+ProductSchema.index({ coachId: 1, isDeleted: 1 });

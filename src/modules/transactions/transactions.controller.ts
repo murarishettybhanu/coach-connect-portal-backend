@@ -12,6 +12,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../schemas/user.schema';
+import { CreatePayoutDto } from './dto/create-payout.dto';
 
 @Controller('transactions')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -38,11 +39,8 @@ export class TransactionsController {
 
   @Post('payout')
   @Roles(UserRole.ADMIN)
-  createPayout(@Body() payoutData: any) {
-    return this.transactionsService.create({
-      ...payoutData,
-      type: 'PAYOUT',
-    });
+  createPayout(@Body() dto: CreatePayoutDto) {
+    return this.transactionsService.createPayout(dto);
   }
 
   @Get()

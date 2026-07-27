@@ -121,3 +121,9 @@ export class Order extends Document {
 }
 
 export const OrderSchema = SchemaFactory.createForClass(Order);
+
+// Indexes for the hot query paths (fulfillment board, coach feeds, approvals).
+OrderSchema.index({ coachId: 1, createdAt: -1 });
+OrderSchema.index({ status: 1 });
+OrderSchema.index({ approvalStatus: 1 });
+OrderSchema.index({ campaignId: 1 });
