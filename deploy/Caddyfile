@@ -22,3 +22,20 @@
 		reverse_proxy frontend:3000
 	}
 }
+
+# API subdomain — used by the frontend once it moves off this box (e.g. Render).
+# Proxies every path straight to the backend, which serves under its /api prefix,
+# so https://api.tribemerchandise.com/api/* → backend:3000/api/*.
+# CORS is handled by NestJS (app.enableCors), not here.
+api.tribemerchandise.com, api.tribemerchandise.in {
+	encode gzip zstd
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	reverse_proxy backend:3000
+}
