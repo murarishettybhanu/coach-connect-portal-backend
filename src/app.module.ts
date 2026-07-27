@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { UsersModule } from './modules/users/users.module';
@@ -20,6 +22,8 @@ import { TribeKitsModule } from './modules/tribe-kits/tribe-kits.module';
     ConfigModule.forRoot({
       isGlobal: true,
     }),
+    // Global per-IP rate limiting (baseline anti-abuse / brute-force protection).
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
     MongooseModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: async (configService: ConfigService) => ({
@@ -40,6 +44,9 @@ import { TribeKitsModule } from './modules/tribe-kits/tribe-kits.module';
     TribeKitsModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+  ],
 })
 export class AppModule {}

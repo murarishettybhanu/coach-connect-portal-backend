@@ -90,14 +90,19 @@ export class TribesService {
     return { ...coachObj, walletBalance: balance };
   }
 
+  // PUBLIC storefront lookup — must only expose display fields. Never return
+  // bankingDetails, walletBalance, or userId on this unauthenticated route.
   async findByUsername(username: string): Promise<any> {
-    const coach = await this.tribeModel.findOne({ username }).exec();
-    if (!coach) {
+    const tribe = await this.tribeModel
+      .findOne({ username })
+      .select(
+        'username brand name bio tagline socialLinks contactEmail profileImage logoUrl storefrontConfig isActive',
+      )
+      .exec();
+    if (!tribe) {
       throw new NotFoundException(`Tribe with username ${username} not found`);
     }
-    const balance = await this.transactionsService.getBalance(coach._id as any);
-    const coachObj = coach.toObject();
-    return { ...coachObj, walletBalance: balance };
+    return tribe;
   }
 
   async update(id: string, tribeData: any): Promise<Tribe> {

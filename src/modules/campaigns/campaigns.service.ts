@@ -13,6 +13,8 @@ export class CampaignsService {
   private readonly activeProductPopulate = {
     path: 'products.productId',
     match: { isDeleted: { $ne: true } },
+    // Never expose internal cost on campaign responses (many are public).
+    select: '-baseProductionCost',
   };
 
   // A populate `match` sets non-matching refs to null rather than removing the
@@ -36,7 +38,7 @@ export class CampaignsService {
   async findAll(): Promise<Campaign[]> {
     const campaigns = await this.campaignModel
       .find()
-      .populate('coachId')
+      .populate('coachId', 'username brand name logoUrl contactEmail')
       .populate(this.activeProductPopulate)
       .lean()
       .exec();
@@ -55,7 +57,7 @@ export class CampaignsService {
   async findBySlug(slug: string): Promise<Campaign> {
     const campaign = await this.campaignModel
       .findOne({ slug } as any)
-      .populate('coachId')
+      .populate('coachId', 'username brand name logoUrl contactEmail')
       .populate(this.activeProductPopulate)
       .lean()
       .exec();
@@ -68,7 +70,7 @@ export class CampaignsService {
   async findOne(id: string): Promise<Campaign> {
     const campaign = await this.campaignModel
       .findById(id)
-      .populate('coachId')
+      .populate('coachId', 'username brand name logoUrl contactEmail')
       .populate(this.activeProductPopulate)
       .lean()
       .exec();
