@@ -8,6 +8,7 @@ import {
   Query,
   UseGuards,
   Request,
+  ForbiddenException,
 } from '@nestjs/common';
 import { OrdersService } from './orders.service';
 import { TribesService } from '../tribes/tribes.service';
@@ -100,8 +101,20 @@ export class OrdersController {
 
   @Get(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  findOne(@Param('id') id: string) {
-    return this.ordersService.findOne(id);
+  @Roles(UserRole.ADMIN, UserRole.TRIBE)
+  async findOne(@Param('id') id: string, @Request() req) {
+    const order = await this.ordersService.findOne(id);
+    // Object-level authorization: a tribe may only read its own orders.
+    if (req.user.role !== UserRole.ADMIN) {
+      const coach = await this.tribesService.findByUserId(
+        req.user.userId || req.user.sub || req.user._id,
+      );
+      const orderCoachId = String((order as any).coachId?._id || (order as any).coachId);
+      if (orderCoachId !== String(coach._id)) {
+        throw new ForbiddenException('Not authorized to view this order');
+      }
+    }
+    return order;
   }
 
   @Patch(':id/status')

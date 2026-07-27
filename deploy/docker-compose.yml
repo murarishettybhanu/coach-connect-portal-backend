@@ -5,9 +5,11 @@ services:
     image: ghcr.io/murarishettybhanu/coach-connect-portal-backend:latest
     restart: unless-stopped
     environment:
+      NODE_ENV: production
       MONGODB_URI: ${MONGODB_URI}
       JWT_SECRET: ${JWT_SECRET}
       PORT: "3000"
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://tribemerchandise.com,https://tribemerchandise.in}
       MAIL_HOST: ${MAIL_HOST:-}
       MAIL_PORT: ${MAIL_PORT:-587}
       MAIL_SECURE: ${MAIL_SECURE:-false}

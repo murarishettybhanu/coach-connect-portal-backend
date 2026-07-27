@@ -86,6 +86,25 @@ export class ProductsService {
     return product;
   }
 
+  // Atomically decrement stock only if enough is available. Returns false when
+  // there wasn't enough (prevents the read-modify-write oversell race).
+  async decrementStock(id: string, qty: number): Promise<boolean> {
+    const res = await this.productModel
+      .updateOne(
+        { _id: id, stockLevel: { $gte: qty } } as any,
+        { $inc: { stockLevel: -qty } },
+      )
+      .exec();
+    return res.modifiedCount > 0;
+  }
+
+  // Atomically restore stock (order reject / rollback).
+  async incrementStock(id: string, qty: number): Promise<void> {
+    await this.productModel
+      .updateOne({ _id: id } as any, { $inc: { stockLevel: qty } })
+      .exec();
+  }
+
   // Soft delete: keep the document, flag it as deleted, and deactivate it so it
   // drops out of listings while remaining resolvable from historical orders.
   async remove(id: string): Promise<Product> {

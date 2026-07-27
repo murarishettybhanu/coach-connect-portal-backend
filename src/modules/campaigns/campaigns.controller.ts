@@ -7,6 +7,7 @@ import {
   Param,
   UseGuards,
   Request,
+  ForbiddenException,
 } from '@nestjs/common';
 import { CampaignsService } from './campaigns.service';
 import { TribesService } from '../tribes/tribes.service';
@@ -58,7 +59,20 @@ export class CampaignsController {
   @Patch(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.TRIBE, UserRole.ADMIN)
-  update(@Param('id') id: string, @Body() campaignData: any) {
+  async update(@Param('id') id: string, @Body() campaignData: any, @Request() req) {
+    if (req.user.role !== UserRole.ADMIN) {
+      // A tribe may only edit its OWN campaigns and cannot reassign ownership.
+      const coach = await this.tribesService.findByUserId(
+        req.user.userId || req.user.sub || req.user._id,
+      );
+      const campaign: any = await this.campaignsService.findOne(id);
+      const owner = String(campaign.coachId?._id || campaign.coachId);
+      if (owner !== String(coach._id)) {
+        throw new ForbiddenException('Not authorized to update this campaign');
+      }
+      delete campaignData.coachId;
+      delete campaignData.claims;
+    }
     return this.campaignsService.update(id, campaignData);
   }
 }

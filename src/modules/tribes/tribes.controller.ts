@@ -7,6 +7,7 @@ import {
   Param,
   UseGuards,
   Request,
+  ForbiddenException,
 } from '@nestjs/common';
 import { TribesService } from './tribes.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -55,7 +56,20 @@ export class TribesController {
   @Patch(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.TRIBE)
-  update(@Param('id') id: string, @Body() tribeData: any) {
+  async update(@Param('id') id: string, @Body() tribeData: any, @Request() req) {
+    if (req.user.role !== UserRole.ADMIN) {
+      // A tribe may only edit its OWN record, and not privileged fields.
+      const coach = await this.tribesService.findByUserId(
+        req.user.userId || req.user.sub || req.user._id,
+      );
+      if (String(coach._id) !== String(id)) {
+        throw new ForbiddenException('Not authorized to update this tribe');
+      }
+      delete tribeData.walletBalance;
+      delete tribeData.isActive;
+      delete tribeData.userId;
+      delete tribeData.username;
+    }
     return this.tribesService.update(id, tribeData);
   }
 }
