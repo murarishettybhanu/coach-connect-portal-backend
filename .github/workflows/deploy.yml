@@ -30,7 +30,12 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Immutable SHA tag (for rollback/audit) + moving :latest.
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
 
       # Version-deploy the infra config (compose + Caddyfile) to the VM so
       # changes here actually take effect, not just the container images.
@@ -73,8 +78,26 @@ jobs:
             EOF
             chmod 600 .env
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            # Remember the currently-running image so we can roll back if the new one is unhealthy.
+            PREV_IMG=$(docker inspect --format '{{.Image}}' "$(docker compose ps -q backend)" 2>/dev/null || echo "")
             docker compose pull backend
             docker compose up -d backend caddy
             # Pick up any Caddyfile changes (graceful, no downtime).
             docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile || true
+            # Health gate: wait for the backend container's HEALTHCHECK to pass.
+            HEALTHY=0
+            for i in $(seq 1 24); do
+              ST=$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q backend)" 2>/dev/null || echo "")
+              if [ "$ST" = "healthy" ] || [ -z "$ST" ]; then HEALTHY=1; break; fi
+              sleep 5
+            done
+            if [ "$HEALTHY" != "1" ]; then
+              echo "Backend did not become healthy — rolling back to previous image."
+              if [ -n "$PREV_IMG" ]; then
+                docker tag "$PREV_IMG" ghcr.io/${{ github.repository }}:latest
+                docker compose up -d backend
+              fi
+              docker logout ghcr.io || true
+              exit 1
+            fi
             docker logout ghcr.io || true
