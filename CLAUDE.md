@@ -151,14 +151,18 @@ CORS restricted to `CORS_ORIGINS`; security headers + global exception filter ad
 Swagger disabled in production; ownership checks + server-derived order pricing +
 atomic stock decrement.
 
-**Still open**, ordered by severity:
+**Still open** (backlog — to be planned/prioritized later), ordered by severity:
 1. **🟠 No token expiry handling** — JWTs are signed without an explicit `expiresIn`,
-   and there's no refresh flow. Sessions effectively don't expire.
+   and there's no refresh flow. Sessions effectively don't expire. Add `expiresIn` +
+   a refresh mechanism (coordinate with the frontend's client-side session).
 2. **🟡 `walletBalance` not source of truth** — `Coach.walletBalance` exists but
    balance is computed from the transaction ledger (`transactions.service.getBalance`).
    The schema field can drift; either keep it in sync or remove it to avoid confusion.
 3. **🟡 Loose typing** — services accept/return `any` for write payloads in several
    places (orders, transactions, coaches). Add DTOs (see `auth/dto/`) when extending.
+4. **🟢 CI on deprecated Node 20** — `.github/workflows/deploy.yml` uses actions
+   (`actions/checkout@v4`, `docker/*-action`, `appleboy/*`) that GitHub now force-runs
+   on Node 24 (Node 20 deprecated). Bump action major versions when convenient.
 
 ## Conventions
 
