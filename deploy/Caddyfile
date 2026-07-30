@@ -1,8 +1,36 @@
-# This box now runs ONLY the backend API. The frontend was moved to Render, and the
-# apex/www domains point there directly — Caddy here just serves the API subdomain.
+# Single-box hosting: this EC2 serves BOTH the static frontend (apex/www) and the
+# backend API (api. subdomain). The frontend is a static SPA (built by the
+# coach-connect-portal repo, shipped to /opt/shipkit/frontend and mounted at
+# /srv/frontend); it calls the API cross-origin at the api. subdomain (CORS handled
+# by NestJS). No frontend Node process runs here.
+
+# --- Frontend: static SPA on the apex/www domains ({$SITE_ADDRESS}) ---
+{$SITE_ADDRESS} {
+	encode gzip zstd
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Hashed build assets are immutable → cache hard. index.html (the SPA shell)
+	# is left revalidatable so new deploys are picked up immediately.
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	root * /srv/frontend
+	# SPA deep-link fallback: unknown paths serve the shell; the client router
+	# renders the route (data + auth are client-side).
+	try_files {path} /index.html
+	file_server
+}
+
+# --- Backend API on the api. subdomain ---
 # Proxies every path straight to the backend, which serves under its /api prefix,
 # so https://api.tribemerchandise.com/api/* → backend:3000/api/*.
-# CORS is handled by NestJS (app.enableCors), not here.
 api.tribemerchandise.com, api.tribemerchandise.in {
 	encode gzip zstd
 

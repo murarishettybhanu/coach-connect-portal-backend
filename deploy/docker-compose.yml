@@ -28,9 +28,9 @@ services:
     expose:
       - "3000"
 
-  # Frontend moved to Render (served on the apex/www domains). This box runs
-  # backend + caddy only. To roll back: point apex DNS back to this IP and
-  # re-add a frontend service + apex handle to the Caddyfile.
+  # Frontend is a STATIC SPA served by caddy from ./frontend (mounted read-only
+  # at /srv/frontend). The coach-connect-portal repo's CI builds the static bundle
+  # and rsyncs it into /opt/shipkit/frontend. No frontend Node container runs here.
 
   caddy:
     image: caddy:2-alpine
@@ -45,10 +45,9 @@ services:
       SITE_ADDRESS: ${SITE_ADDRESS:-:80}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./frontend:/srv/frontend:ro
       - caddy_data:/data
       - caddy_config:/config
-    # No depends_on: backend & frontend deploy independently (each CI job only
-    # has access to its own GHCR image). Caddy proxies whichever is up.
 
 volumes:
   caddy_data:
