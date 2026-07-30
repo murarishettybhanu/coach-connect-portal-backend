@@ -4,10 +4,12 @@ Context for Claude when working in this repo. Read this before making changes.
 
 ## What this is
 
-REST API for **ShipKit** — an end-to-end fulfillment + storefront platform for
-Indian coaches/creators. Coaches send branded "Welcome Kits" to their audience
-and sell merch through hosted storefronts; ShipKit (the admin/platform) handles
-inventory, dispatch, and payouts. Currency is INR throughout.
+REST API for **Tribe Merchandise** (formerly "ShipKit") — an end-to-end fulfillment
++ storefront platform for Indian creators/coaches. A creator's audience is their
+**"tribe"**; creators send branded welcome kits and sell merch through hosted
+storefronts, while the admin/platform handles inventory, dispatch, and payouts.
+Currency is INR throughout. (Internal field/model naming often still uses `coach`/
+`coachId` — the "tribe" rename was primarily UI/routes.)
 
 This is the backend that the [coach-connect-portal](../coach-connect-portal) frontend talks to.
 
@@ -31,15 +33,27 @@ npm run lint           # eslint --fix
 ```
 
 **Global route prefix is `/api`** (set in `main.ts`), so all endpoints are `/api/...`.
-CORS is enabled for all origins.
+CORS is restricted to the frontend origins in `CORS_ORIGINS`. Also live in `main.ts`:
+`helmet`, `trust proxy`, a global exception filter, and Swagger only when `NODE_ENV !== production`.
 
-### Env (`.env`)
+### Env (`.env` — gitignored; provisioned on the VM from GitHub Actions secrets)
 - `MONGODB_URI` — Mongo connection string (Atlas)
-- `JWT_SECRET` — JWT signing secret (falls back to `'default-secret'` if unset — fix before prod)
-- `PORT` — defaults to 3000
+- `JWT_SECRET` — **required** signing secret; boot fails fast if unset (no default)
+- `CORS_ORIGINS` — comma-separated allowed frontend origins
+- `SITE_ADDRESS` — Caddy apex/www domains for the static frontend (see Deployment)
+- `MAIL_*` (SES SMTP), `S3_*` (uploads to S3), `PORT` (default 3000)
 
-> ⚠️ `info.md` currently contains live MongoDB Atlas credentials committed to the
-> repo. Treat as a leaked secret — rotate and remove from version control.
+> Secrets live only in GitHub Actions secrets + the VM's gitignored `.env`. Never commit them.
+
+## Deployment
+
+Single **AWS EC2 t3.micro** (`/opt/shipkit/`, see [`deploy/`](deploy/)) runs this backend
+container + **Caddy**. Caddy serves the **static SPA frontend** on the apex/www domains
+(from `/opt/shipkit/frontend`) and reverse-proxies **`api.tribemerchandise.com`/`.in` →
+`backend:3000`**; the frontend calls the API cross-origin (CORS allows the apex origin).
+CI (`.github/workflows/deploy.yml`) builds the image → GHCR → SSH deploy with a
+**health-gated rollout + rollback**, and syncs `deploy/docker-compose.yml` + `Caddyfile`.
+MongoDB Atlas, AWS S3 (uploads), AWS SES (mail).
 
 ## Architecture
 
@@ -130,25 +144,20 @@ the ledger, not read off `coach.walletBalance` — the schema field is not the s
 
 ## Known issues / tech debt
 
-Address before production. Ordered by severity.
+**Resolved** (during the production-hardening pass — do not reintroduce): leaked
+credentials rotated + purged from git history; `JWT_SECRET` now required at boot
+(no `'default-secret'` fallback); `.env` gitignored + provisioned from CI secrets;
+CORS restricted to `CORS_ORIGINS`; security headers + global exception filter added;
+Swagger disabled in production; ownership checks + server-derived order pricing +
+atomic stock decrement.
 
-1. **🔴 Leaked credentials** — `info.md` contains a live MongoDB Atlas
-   username, password, and connection URI committed to the repo. Rotate the
-   Atlas password immediately, delete `info.md` from version control, and add it
-   to `.gitignore`. Assume the secret is compromised.
-2. **🔴 Weak JWT secret fallback** — `jwt.strategy.ts` falls back to the literal
-   `'default-secret'` when `JWT_SECRET` is unset, so tokens are forgeable in any
-   env missing the var. Require `JWT_SECRET` at boot (fail fast) and never ship a default.
-3. **🟠 `.env` committed** — the `.env` file (MONGODB_URI / JWT_SECRET / PORT) is
-   present in the repo. Should be gitignored; provide a `.env.example` with keys only.
-4. **🟠 No token expiry handling** — JWTs are signed without an explicit `expiresIn`,
+**Still open**, ordered by severity:
+1. **🟠 No token expiry handling** — JWTs are signed without an explicit `expiresIn`,
    and there's no refresh flow. Sessions effectively don't expire.
-5. **🟡 CORS open to all origins** — `app.enableCors()` allows any origin. Restrict
-   to the known frontend origin(s) in production.
-6. **🟡 `walletBalance` not source of truth** — `Coach.walletBalance` exists but
+2. **🟡 `walletBalance` not source of truth** — `Coach.walletBalance` exists but
    balance is computed from the transaction ledger (`transactions.service.getBalance`).
    The schema field can drift; either keep it in sync or remove it to avoid confusion.
-7. **🟡 Loose typing** — services accept/return `any` for write payloads in many
+3. **🟡 Loose typing** — services accept/return `any` for write payloads in several
    places (orders, transactions, coaches). Add DTOs (see `auth/dto/`) when extending.
 
 ## Conventions
