@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, isValidObjectId } from 'mongoose';
+import type { Response } from 'express';
+import archiver = require('archiver');
 import { Order, OrderStatus, OrderType, ApprovalStatus } from '../../schemas/order.schema';
 import { Campaign, CampaignFormType } from '../../schemas/campaign.schema';
 import { ProductsService } from '../products/products.service';
@@ -264,6 +266,47 @@ export class OrdersService {
     order.addressPending = false;
     order.markModified('shippingAddress');
     return order.save();
+  }
+
+  // Admin: stream a ZIP of the customer-uploaded PHOTO media for the given orders.
+  // Images are fetched server-side from their public URLs (no browser CORS issues).
+  async streamMediaZip(orderIds: string[], res: Response): Promise<void> {
+    const ids = (orderIds || []).filter((id) => isValidObjectId(id));
+    const orders = ids.length
+      ? await this.orderModel.find({ _id: { $in: ids } } as any).exec()
+      : [];
+
+    const archive = archiver('zip', { zlib: { level: 5 } });
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="order-media.zip"');
+    archive.on('error', () => {
+      try { if (!res.headersSent) res.status(500); res.end(); } catch { /* noop */ }
+    });
+    archive.pipe(res);
+
+    const used = new Set<string>();
+    for (const o of orders) {
+      const base =
+        (String((o.shippingAddress as any)?.fullName || 'order').replace(/[^\w-]+/g, '_').slice(0, 40)) || 'order';
+      const short = String(o._id).slice(-6);
+      let idx = 0;
+      for (const item of ((o.items as any[]) || [])) {
+        if (item.customizationType !== 'PHOTO' || !item.customizationValue) continue;
+        try {
+          const resp = await fetch(String(item.customizationValue));
+          if (!resp.ok) continue;
+          const buf = Buffer.from(await resp.arrayBuffer());
+          const ext = (String(item.customizationValue).split('?')[0].split('.').pop() || 'jpg').slice(0, 5);
+          let name = `${base}-${short}-${++idx}.${ext}`;
+          while (used.has(name)) name = `${base}-${short}-${++idx}.${ext}`;
+          used.add(name);
+          archive.append(buf, { name });
+        } catch {
+          // skip unreachable media
+        }
+      }
+    }
+    await archive.finalize();
   }
 
   async approveOrder(

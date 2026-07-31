@@ -6,10 +6,12 @@ import {
   Patch,
   Param,
   Query,
+  Res,
   UseGuards,
   Request,
   ForbiddenException,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { OrdersService } from './orders.service';
 import { TribesService } from '../tribes/tribes.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -71,6 +73,14 @@ export class OrdersController {
       dto.phone,
       dto.address,
     );
+  }
+
+  // Admin: download a ZIP of customer-uploaded PHOTO media for the given orders.
+  @Post('media/download')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  async downloadMedia(@Body('orderIds') orderIds: string[], @Res() res: Response) {
+    await this.ordersService.streamMediaZip(orderIds || [], res);
   }
 
   // Tribe/Admin: list a campaign's address-pending claims (bulk upload + count).
