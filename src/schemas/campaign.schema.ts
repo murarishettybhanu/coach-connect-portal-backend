@@ -12,6 +12,15 @@ export enum CampaignStatus {
   STOPPED = 'STOPPED',
 }
 
+// How the public claim form collects the shipping address:
+// - WITH_ADDRESS: one form collects details + address (default, all campaign types).
+// - WITHOUT_ADDRESS: step 1 collects details only; address is attached later (via the
+//   standalone address page or bulk upload). Only valid for WELCOME_KIT campaigns.
+export enum CampaignFormType {
+  WITH_ADDRESS = 'WITH_ADDRESS',
+  WITHOUT_ADDRESS = 'WITHOUT_ADDRESS',
+}
+
 @Schema({ timestamps: true })
 export class Campaign extends Document {
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Tribe', required: true })
@@ -39,6 +48,13 @@ export class Campaign extends Document {
 
   @Prop({ type: String, enum: CampaignStatus, default: CampaignStatus.ACTIVE })
   status: CampaignStatus;
+
+  @Prop({
+    type: String,
+    enum: CampaignFormType,
+    default: CampaignFormType.WITH_ADDRESS,
+  })
+  formType: CampaignFormType;
 
   @Prop()
   description?: string;

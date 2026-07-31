@@ -24,13 +24,14 @@ async function bootstrap() {
     transform: true,
   }));
 
-  // Lock CORS to configured frontend origins in production; open in dev.
+  // Lock CORS to configured frontend origins in production; open in dev so
+  // localhost / LAN dev servers work without per-machine CORS config.
   const origins = (process.env.CORS_ORIGINS || process.env.FRONTEND_URL || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
   app.enableCors({
-    origin: origins.length ? origins : true,
+    origin: isProd && origins.length ? origins : true,
     credentials: true,
   });
 

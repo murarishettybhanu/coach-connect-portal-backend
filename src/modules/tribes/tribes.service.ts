@@ -106,12 +106,34 @@ export class TribesService {
   }
 
   async update(id: string, tribeData: any): Promise<Tribe> {
-    const updatedCoach = await this.tribeModel
-      .findByIdAndUpdate(id, tribeData, { new: true })
-      .exec();
-    if (!updatedCoach) {
+    const tribe = await this.tribeModel.findById(id).exec();
+    if (!tribe) {
       throw new NotFoundException(`Tribe with ID ${id} not found`);
     }
-    return updatedCoach;
+
+    // `email` lives on the linked User (login), not the Tribe. `name` is mirrored to
+    // both (User is the source of truth for display; Tribe.name kept in sync too).
+    const { email, ...tribeFields } = tribeData;
+    const userPatch: { name?: string; email?: string } = {};
+    if (tribeFields.name !== undefined) userPatch.name = tribeFields.name;
+    if (email !== undefined) userPatch.email = email;
+    if (Object.keys(userPatch).length) {
+      await this.usersService.update(String(tribe.userId), userPatch);
+    }
+
+    const updatedCoach = await this.tribeModel
+      .findByIdAndUpdate(id, tribeFields, { new: true })
+      .exec();
+    return updatedCoach as Tribe;
+  }
+
+  // Admin: reset the login password on a tribe's linked User account.
+  async resetPassword(id: string, password: string): Promise<void> {
+    const tribe = await this.tribeModel.findById(id).exec();
+    if (!tribe) {
+      throw new NotFoundException(`Tribe with ID ${id} not found`);
+    }
+    const hashed = await bcrypt.hash(password, 10);
+    await this.usersService.updatePassword(String(tribe.userId), hashed);
   }
 }

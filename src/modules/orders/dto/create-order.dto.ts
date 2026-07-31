@@ -14,14 +14,18 @@ import {
 import { Type } from 'class-transformer';
 import { OrderType } from '../../../schemas/order.schema';
 
+// Address block for ORDER CREATE. Only contact (fullName + phone) is mandatory here,
+// because "without address" campaign claims omit the address entirely (it's attached
+// later). Full-address completeness for "with address" campaigns is enforced in
+// orders.service.create() based on the campaign's formType.
 export class ShippingAddressDto {
   @IsNotEmpty()
   @IsString()
   fullName: string;
 
-  @IsNotEmpty()
+  @IsOptional()
   @IsString()
-  addressLine1: string;
+  addressLine1?: string;
 
   @IsOptional()
   @IsString()
@@ -35,21 +39,21 @@ export class ShippingAddressDto {
   @IsString()
   sectorVillage?: string;
 
-  @IsNotEmpty()
+  @IsOptional()
   @IsString()
-  city: string;
+  city?: string;
 
   @IsOptional()
   @IsString()
   district?: string;
 
-  @IsNotEmpty()
+  @IsOptional()
   @IsString()
-  state: string;
+  state?: string;
 
-  @IsNotEmpty()
+  @IsOptional()
   @IsString()
-  pincode: string;
+  pincode?: string;
 
   @IsNotEmpty()
   @IsString()

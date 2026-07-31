@@ -1,8 +1,8 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, isValidObjectId } from 'mongoose';
 import { Order, OrderStatus, OrderType, ApprovalStatus } from '../../schemas/order.schema';
-import { Campaign } from '../../schemas/campaign.schema';
+import { Campaign, CampaignFormType } from '../../schemas/campaign.schema';
 import { ProductsService } from '../products/products.service';
 import { TransactionsService } from '../transactions/transactions.service';
 import { TransactionType } from '../../schemas/transaction.schema';
@@ -107,12 +107,50 @@ export class OrdersService {
 
     const isWelcomeKit = type === OrderType.WELCOME_KIT;
 
+    // Address handling depends on the campaign's form type. "Without address"
+    // campaigns (WELCOME_KIT only) capture contact now; the delivery address is
+    // attached later via the address page or bulk upload.
+    const formType = campaign?.formType || CampaignFormType.WITH_ADDRESS;
+    const addr = orderData.shippingAddress || {};
+    if (!addr.fullName || !addr.phone) {
+      throw new BadRequestException('Name and phone are required');
+    }
+
+    let addressPending = false;
+    let shippingAddress: any;
+    if (formType === CampaignFormType.WITHOUT_ADDRESS) {
+      if (!isWelcomeKit) {
+        throw new BadRequestException(
+          'Address-less claims are only allowed for welcome-kit campaigns',
+        );
+      }
+      addressPending = true;
+      // Store contact only; the delivery address is filled in later.
+      shippingAddress = {
+        fullName: addr.fullName,
+        phone: addr.phone,
+        ...(addr.email ? { email: addr.email } : {}),
+      };
+    } else {
+      // Full delivery address is required up front.
+      const missing = ['addressLine1', 'city', 'state', 'pincode'].filter(
+        (f) => !addr[f],
+      );
+      if (missing.length) {
+        throw new BadRequestException(
+          `Missing address fields: ${missing.join(', ')}`,
+        );
+      }
+      shippingAddress = addr;
+    }
+
     // Explicit build — do NOT spread client orderData (mass-assignment guard).
     const order = new this.orderModel({
       coachId,
       campaignId: orderData.campaignId,
       type,
-      shippingAddress: orderData.shippingAddress,
+      shippingAddress,
+      addressPending,
       items: itemsWithDetails,
       totalCommission,
       totalAmount,
@@ -147,6 +185,85 @@ export class OrdersService {
     }
 
     return savedOrder;
+  }
+
+  // ---- Address-pending claims ("without address" campaigns) ----
+
+  // Merge a supplied delivery address onto a claim, preserving the existing
+  // contact (fullName/phone/email) when the incoming payload omits it.
+  private mergeAddress(existing: any, incoming: any) {
+    const e = existing || {};
+    return {
+      fullName: incoming.fullName || e.fullName,
+      addressLine1: incoming.addressLine1,
+      addressLine2: incoming.addressLine2,
+      landmark: incoming.landmark,
+      sectorVillage: incoming.sectorVillage,
+      city: incoming.city,
+      district: incoming.district,
+      state: incoming.state,
+      pincode: incoming.pincode,
+      phone: incoming.phone || e.phone,
+      email: incoming.email || e.email,
+    };
+  }
+
+  // Public: does an address-pending claim exist for this campaign + phone?
+  async findPendingClaim(campaignId: string, phone: string) {
+    const cleanPhone = String(phone || '').trim();
+    if (!isValidObjectId(campaignId) || !cleanPhone) return { found: false, count: 0 };
+    const orders = await this.orderModel
+      .find({ campaignId, addressPending: true, 'shippingAddress.phone': cleanPhone } as any)
+      .select('shippingAddress createdAt')
+      .sort({ createdAt: -1 })
+      .exec();
+    return {
+      found: orders.length > 0,
+      count: orders.length,
+      fullName: orders[0]?.shippingAddress?.fullName,
+    };
+  }
+
+  // Public: fill the delivery address on ALL address-pending claims matching
+  // campaign + phone. Never touches already-completed (addressPending:false) orders.
+  async attachAddressByPhone(campaignId: string, phone: string, address: any) {
+    const cleanPhone = String(phone || '').trim();
+    const orders = await this.orderModel
+      .find({ campaignId, addressPending: true, 'shippingAddress.phone': cleanPhone } as any)
+      .exec();
+    if (!orders.length) {
+      throw new NotFoundException('No pending claim found for this phone number');
+    }
+    for (const order of orders) {
+      order.shippingAddress = this.mergeAddress(order.shippingAddress, address);
+      order.addressPending = false;
+      order.markModified('shippingAddress');
+      await order.save();
+    }
+    return { updated: orders.length };
+  }
+
+  // Tribe/Admin: list a campaign's address-pending claims (bulk upload + count).
+  // When coachId is given (tribe caller), scoped to that tribe's own orders.
+  async findAddressPending(campaignId: string, coachId?: string): Promise<Order[]> {
+    if (!isValidObjectId(campaignId)) return [];
+    const filter: any = { campaignId, addressPending: true };
+    if (coachId) filter.coachId = coachId;
+    return this.orderModel
+      .find(filter)
+      .select('shippingAddress createdAt addressPending')
+      .sort({ createdAt: -1 })
+      .exec();
+  }
+
+  // Tribe/Admin: attach/replace the delivery address on a specific claim.
+  async updateAddress(id: string, address: any): Promise<Order> {
+    const order = await this.orderModel.findById(id).exec();
+    if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
+    order.shippingAddress = this.mergeAddress(order.shippingAddress, address);
+    order.addressPending = false;
+    order.markModified('shippingAddress');
+    return order.save();
   }
 
   async approveOrder(

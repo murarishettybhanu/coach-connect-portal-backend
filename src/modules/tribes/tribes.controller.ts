@@ -8,6 +8,7 @@ import {
   UseGuards,
   Request,
   ForbiddenException,
+  BadRequestException,
 } from '@nestjs/common';
 import { TribesService } from './tribes.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -69,7 +70,22 @@ export class TribesController {
       delete tribeData.isActive;
       delete tribeData.userId;
       delete tribeData.username;
+      // Login identity (name/email) is admin-managed only.
+      delete tribeData.email;
+      delete tribeData.name;
     }
     return this.tribesService.update(id, tribeData);
+  }
+
+  // Admin: set a new login password for a tribe's account.
+  @Patch(':id/reset-password')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  async resetPassword(@Param('id') id: string, @Body('password') password: string) {
+    if (!password || password.length < 8) {
+      throw new BadRequestException('Password must be at least 8 characters');
+    }
+    await this.tribesService.resetPassword(id, password);
+    return { success: true };
   }
 }

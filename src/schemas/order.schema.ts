@@ -91,6 +91,11 @@ export class Order extends Document {
     email?: string;
   };
 
+  // True for "without address" campaign claims where step 1 captured only contact
+  // details; the delivery address is attached later (address page or bulk upload).
+  @Prop({ default: false })
+  addressPending: boolean;
+
   @Prop()
   trackingNumber?: string;
 
@@ -127,3 +132,5 @@ OrderSchema.index({ coachId: 1, createdAt: -1 });
 OrderSchema.index({ status: 1 });
 OrderSchema.index({ approvalStatus: 1 });
 OrderSchema.index({ campaignId: 1 });
+// Fast lookup of address-pending claims per campaign (step-2 attach + bulk upload).
+OrderSchema.index({ campaignId: 1, addressPending: 1 });

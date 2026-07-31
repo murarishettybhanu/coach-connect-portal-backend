@@ -16,8 +16,10 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../schemas/user.schema';
+import { Throttle } from '@nestjs/throttler';
 import { OrderStatus } from '../../schemas/order.schema';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { AttachAddressDto, UpdateAddressDto } from './dto/attach-address.dto';
 
 @Controller('orders')
 export class OrdersController {
@@ -48,6 +50,45 @@ export class OrdersController {
   @Post()
   create(@Body() orderData: CreateOrderDto) {
     return this.ordersService.create(orderData);
+  }
+
+  // Public: step-2 lookup — does an address-pending claim exist for this phone?
+  @Get('pending-claim')
+  @Throttle({ default: { limit: 20, ttl: 60000 } })
+  findPendingClaim(
+    @Query('campaignId') campaignId: string,
+    @Query('phone') phone: string,
+  ) {
+    return this.ordersService.findPendingClaim(campaignId, phone);
+  }
+
+  // Public: attach a delivery address to address-pending claim(s) by campaign + phone.
+  @Post('attach-address')
+  @Throttle({ default: { limit: 15, ttl: 60000 } })
+  attachAddress(@Body() dto: AttachAddressDto) {
+    return this.ordersService.attachAddressByPhone(
+      dto.campaignId,
+      dto.phone,
+      dto.address,
+    );
+  }
+
+  // Tribe/Admin: list a campaign's address-pending claims (bulk upload + count).
+  @Get('address-pending')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.TRIBE)
+  async findAddressPending(
+    @Query('campaignId') campaignId: string,
+    @Request() req,
+  ) {
+    let coachId: string | undefined;
+    if (req.user.role !== UserRole.ADMIN) {
+      const coach = await this.tribesService.findByUserId(
+        req.user.userId || req.user.sub || req.user._id,
+      );
+      coachId = String(coach._id);
+    }
+    return this.ordersService.findAddressPending(campaignId, coachId);
   }
 
   @Get()
@@ -155,6 +196,29 @@ export class OrdersController {
       ? 'admin'
       : (req.user.userId || req.user.sub || req.user._id);
     return this.ordersService.rejectOrder(id, rejectedBy, note);
+  }
+
+  // Tribe/Admin: attach/replace the delivery address on a specific claim (bulk upload).
+  @Patch(':id/address')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.TRIBE)
+  async updateAddress(
+    @Param('id') id: string,
+    @Body() address: UpdateAddressDto,
+    @Request() req,
+  ) {
+    // Object-level authorization: a tribe may only update its own orders.
+    if (req.user.role !== UserRole.ADMIN) {
+      const order = await this.ordersService.findOne(id);
+      const coach = await this.tribesService.findByUserId(
+        req.user.userId || req.user.sub || req.user._id,
+      );
+      const orderCoachId = String((order as any).coachId?._id || (order as any).coachId);
+      if (orderCoachId !== String(coach._id)) {
+        throw new ForbiddenException('Not authorized to update this order');
+      }
+    }
+    return this.ordersService.updateAddress(id, address);
   }
 }
 

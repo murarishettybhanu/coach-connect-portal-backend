@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { User } from '../../schemas/user.schema';
@@ -22,5 +22,21 @@ export class UsersService {
 
   async updatePassword(id: string, hashedPassword: string): Promise<void> {
     await this.userModel.findByIdAndUpdate(id, { password: hashedPassword }).exec();
+  }
+
+  // Update a user's name and/or email (email is unique — reject collisions).
+  async update(id: string, data: { name?: string; email?: string }): Promise<void> {
+    const patch: any = {};
+    if (data.name !== undefined) patch.name = data.name;
+    if (data.email !== undefined) {
+      const existing = await this.userModel.findOne({ email: data.email } as any).exec();
+      if (existing && String(existing._id) !== String(id)) {
+        throw new ConflictException('A user with this email already exists');
+      }
+      patch.email = data.email;
+    }
+    if (Object.keys(patch).length) {
+      await this.userModel.findByIdAndUpdate(id, patch).exec();
+    }
   }
 }
