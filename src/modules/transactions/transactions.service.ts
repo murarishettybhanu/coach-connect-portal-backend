@@ -44,6 +44,11 @@ export class TransactionsService {
     return this.transactionModel.find({ coachId } as any).sort({ createdAt: -1 }).exec();
   }
 
+  // Remove ledger entries tied to an order (used when an order is deleted).
+  async deleteByOrder(orderId: string): Promise<void> {
+    await this.transactionModel.deleteMany({ orderId } as any).exec();
+  }
+
   async getBalance(coachId: string): Promise<number> {
     const transactions = await this.transactionModel.find({ coachId } as any).exec();
     

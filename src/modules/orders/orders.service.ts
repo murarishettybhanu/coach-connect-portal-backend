@@ -215,7 +215,7 @@ export class OrdersService {
     const cleanPhone = String(phone || '').trim();
     if (!isValidObjectId(campaignId) || !cleanPhone) return { found: false, count: 0 };
     const orders = await this.orderModel
-      .find({ campaignId, addressPending: true, 'shippingAddress.phone': cleanPhone } as any)
+      .find({ campaignId, addressPending: true, 'shippingAddress.phone': cleanPhone, isDeleted: { $ne: true } } as any)
       .select('shippingAddress createdAt')
       .sort({ createdAt: -1 })
       .exec();
@@ -231,7 +231,7 @@ export class OrdersService {
   async attachAddressByPhone(campaignId: string, phone: string, address: any) {
     const cleanPhone = String(phone || '').trim();
     const orders = await this.orderModel
-      .find({ campaignId, addressPending: true, 'shippingAddress.phone': cleanPhone } as any)
+      .find({ campaignId, addressPending: true, 'shippingAddress.phone': cleanPhone, isDeleted: { $ne: true } } as any)
       .exec();
     if (!orders.length) {
       throw new NotFoundException('No pending claim found for this phone number');
@@ -249,7 +249,7 @@ export class OrdersService {
   // When coachId is given (tribe caller), scoped to that tribe's own orders.
   async findAddressPending(campaignId: string, coachId?: string): Promise<Order[]> {
     if (!isValidObjectId(campaignId)) return [];
-    const filter: any = { campaignId, addressPending: true };
+    const filter: any = { campaignId, addressPending: true, isDeleted: { $ne: true } };
     if (coachId) filter.coachId = coachId;
     return this.orderModel
       .find(filter)
@@ -266,6 +266,69 @@ export class OrdersService {
     order.addressPending = false;
     order.markModified('shippingAddress');
     return order.save();
+  }
+
+  // Admin: SOFT-delete an order — hidden from all lists/pipeline, recoverable via
+  // restore. Frees stock (unless already shipped/cancelled) and removes ledger
+  // entries so a deleted order stops counting toward the tribe's balance.
+  async deleteOrder(id: string): Promise<void> {
+    const order = await this.orderModel.findById(id).populate('items.productId').exec();
+    if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
+    if (order.isDeleted) return;
+
+    if (order.status !== OrderStatus.DELIVERED && order.status !== OrderStatus.CANCELLED) {
+      for (const item of order.items) {
+        const pid = (item.productId as any)?._id || item.productId;
+        if (pid) await this.productsService.incrementStock(String(pid), item.quantity);
+      }
+    }
+    await this.transactionsService.deleteByOrder(id);
+    order.isDeleted = true;
+    order.deletedAt = new Date();
+    await order.save();
+  }
+
+  // Admin: restore a soft-deleted order. Re-decrements stock (best-effort) and
+  // re-creates its commission ledger entry where applicable.
+  async restoreOrder(id: string): Promise<Order> {
+    const order = await this.orderModel.findById(id).populate('items.productId').exec();
+    if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
+    if (!order.isDeleted) return order;
+
+    if (order.status !== OrderStatus.DELIVERED && order.status !== OrderStatus.CANCELLED) {
+      for (const item of order.items) {
+        const pid = (item.productId as any)?._id || item.productId;
+        if (pid) await this.productsService.decrementStock(String(pid), item.quantity);
+      }
+    }
+    const eligibleForCommission =
+      order.totalCommission > 0 &&
+      (order.type === OrderType.STORE_SALE ||
+        (order.type === OrderType.WELCOME_KIT && order.approvalStatus === ApprovalStatus.APPROVED));
+    if (eligibleForCommission) {
+      await this.transactionsService.create({
+        coachId: order.coachId as any,
+        type: TransactionType.COMMISSION,
+        amount: order.totalCommission,
+        orderId: order._id as any,
+        description: `Commission from restored Order #${order._id.toString().slice(-6)}`,
+      });
+    }
+    order.isDeleted = false;
+    order.deletedAt = undefined as any;
+    return order.save();
+  }
+
+  // Admin: list soft-deleted orders (optionally scoped to a tribe).
+  async findDeleted(coachId?: string): Promise<Order[]> {
+    const filter: any = { isDeleted: true };
+    if (coachId) filter.coachId = coachId;
+    return this.orderModel
+      .find(filter)
+      .sort({ deletedAt: -1 })
+      .populate('items.productId')
+      .populate('campaignId', 'name type')
+      .exec();
   }
 
   // Admin: stream a ZIP of the customer-uploaded PHOTO media for the given orders.
@@ -379,7 +442,7 @@ export class OrdersService {
   }
 
   async findPendingApprovals(coachId?: string): Promise<Order[]> {
-    const filter: any = { approvalStatus: ApprovalStatus.PENDING };
+    const filter: any = { approvalStatus: ApprovalStatus.PENDING, isDeleted: { $ne: true } };
     if (coachId) filter.coachId = coachId;
     return this.orderModel.find(filter)
       .sort({ createdAt: -1 })
@@ -389,11 +452,11 @@ export class OrdersService {
   }
 
   async findAll(): Promise<Order[]> {
-    return this.orderModel.find().sort({ createdAt: -1 }).populate('coachId').populate('items.productId').populate('campaignId', 'name type').exec();
+    return this.orderModel.find({ isDeleted: { $ne: true } } as any).sort({ createdAt: -1 }).populate('coachId').populate('items.productId').populate('campaignId', 'name type').exec();
   }
 
   async findByCoach(coachId: string): Promise<Order[]> {
-    return this.orderModel.find({ coachId } as any).sort({ createdAt: -1 }).populate('items.productId').populate('campaignId', 'name type').exec();
+    return this.orderModel.find({ coachId, isDeleted: { $ne: true } } as any).sort({ createdAt: -1 }).populate('items.productId').populate('campaignId', 'name type').exec();
   }
 
   async findByCoachPaginated(
@@ -410,7 +473,7 @@ export class OrdersService {
     const limit = Math.min(100, Math.max(1, Number(options.limit) || 10));
     const skip = (page - 1) * limit;
 
-    const filter: any = { coachId };
+    const filter: any = { coachId, isDeleted: { $ne: true } };
 
     if (options.status) {
       filter.status = options.status;
@@ -473,7 +536,7 @@ export class OrdersService {
     const limit = Math.min(100, Math.max(1, Number(options.limit) || 10));
     const skip = (page - 1) * limit;
 
-    const filter: any = {};
+    const filter: any = { isDeleted: { $ne: true } };
     if (options.status) {
       filter.status = options.status;
     }

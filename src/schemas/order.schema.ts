@@ -96,6 +96,13 @@ export class Order extends Document {
   @Prop({ default: false })
   addressPending: boolean;
 
+  // Soft delete — hidden from all normal lists/pipeline; recoverable via restore.
+  @Prop({ default: false })
+  isDeleted: boolean;
+
+  @Prop()
+  deletedAt?: Date;
+
   @Prop()
   trackingNumber?: string;
 
@@ -134,3 +141,4 @@ OrderSchema.index({ approvalStatus: 1 });
 OrderSchema.index({ campaignId: 1 });
 // Fast lookup of address-pending claims per campaign (step-2 attach + bulk upload).
 OrderSchema.index({ campaignId: 1, addressPending: 1 });
+OrderSchema.index({ coachId: 1, isDeleted: 1 });

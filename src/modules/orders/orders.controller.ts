@@ -7,6 +7,7 @@ import {
   Param,
   Query,
   Res,
+  Delete,
   UseGuards,
   Request,
   ForbiddenException,
@@ -81,6 +82,14 @@ export class OrdersController {
   @Roles(UserRole.ADMIN)
   async downloadMedia(@Body('orderIds') orderIds: string[], @Res() res: Response) {
     await this.ordersService.streamMediaZip(orderIds || [], res);
+  }
+
+  // Admin: list soft-deleted orders (optionally scoped to a tribe).
+  @Get('deleted')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  findDeleted(@Query('coachId') coachId?: string) {
+    return this.ordersService.findDeleted(coachId);
   }
 
   // Tribe/Admin: list a campaign's address-pending claims (bulk upload + count).
@@ -229,6 +238,23 @@ export class OrdersController {
       }
     }
     return this.ordersService.updateAddress(id, address);
+  }
+
+  // Admin: soft-delete an order (recoverable).
+  @Delete(':id')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  async remove(@Param('id') id: string) {
+    await this.ordersService.deleteOrder(id);
+    return { success: true };
+  }
+
+  // Admin: restore a soft-deleted order.
+  @Patch(':id/restore')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  restore(@Param('id') id: string) {
+    return this.ordersService.restoreOrder(id);
   }
 }
 
