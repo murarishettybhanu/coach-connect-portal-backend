@@ -8,6 +8,8 @@ import { Campaign, CampaignFormType } from '../../schemas/campaign.schema';
 import { ProductsService } from '../products/products.service';
 import { TransactionsService } from '../transactions/transactions.service';
 import { TransactionType } from '../../schemas/transaction.schema';
+import { BarcodesService } from '../barcodes/barcodes.service';
+import { BarcodeType } from '../../schemas/barcode.schema';
 
 @Injectable()
 export class OrdersService {
@@ -16,6 +18,7 @@ export class OrdersService {
     @InjectModel(Campaign.name) private campaignModel: Model<Campaign>,
     private productsService: ProductsService,
     private transactionsService: TransactionsService,
+    private barcodesService: BarcodesService,
   ) {}
 
   // Public endpoint — NEVER trust client-supplied coachId / type / prices.
@@ -151,6 +154,9 @@ export class OrdersService {
       coachId,
       campaignId: orderData.campaignId,
       type,
+      // Inherit the campaign's delivery type only when it set one; otherwise leave
+      // it unset (store sales + campaigns with no type) so it must be chosen at dispatch.
+      deliveryType: campaign?.deliveryType || null,
       shippingAddress,
       addressPending,
       items: itemsWithDetails,
@@ -282,6 +288,14 @@ export class OrdersService {
         if (pid) await this.productsService.incrementStock(String(pid), item.quantity);
       }
     }
+    // Free the barcode back to the pool only while the order is still in the
+    // "Ready to Ship" (PACKED) stage — it hasn't physically shipped yet. Once
+    // DISPATCHED/DELIVERED the barcode is on a real parcel and must never be reused.
+    if (order.status === OrderStatus.PACKED) {
+      await this.barcodesService.releaseFromOrder(id);
+      order.trackingNumber = undefined as any;
+      order.barcodePending = false;
+    }
     await this.transactionsService.deleteByOrder(id);
     order.isDeleted = true;
     order.deletedAt = new Date();
@@ -313,6 +327,22 @@ export class OrdersService {
         orderId: order._id as any,
         description: `Commission from restored Order #${order._id.toString().slice(-6)}`,
       });
+    }
+    // Re-claim a barcode if the order was in the "Ready to Ship" (PACKED) stage —
+    // its previous one was freed on delete.
+    if (order.status === OrderStatus.PACKED && !order.trackingNumber) {
+      const type = (order.deliveryType as BarcodeType | null) || null;
+      if (type) {
+        const bc = await this.barcodesService.assignToOrder(id, type);
+        if (bc) {
+          order.trackingNumber = bc.code;
+          order.barcodePending = false;
+        } else {
+          order.barcodePending = true;
+        }
+      } else {
+        order.barcodePending = true;
+      }
     }
     order.isDeleted = false;
     order.deletedAt = undefined as any;
@@ -477,6 +507,10 @@ export class OrdersService {
 
     if (options.status) {
       filter.status = options.status;
+      // "New" excludes welcome-kit orders still awaiting approval.
+      if (options.status === OrderStatus.NEW) {
+        filter.approvalStatus = { $ne: ApprovalStatus.PENDING };
+      }
     }
 
     // Delivered orders sort by delivery time (newest first); fall back to creation time.
@@ -539,6 +573,11 @@ export class OrdersService {
     const filter: any = { isDeleted: { $ne: true } };
     if (options.status) {
       filter.status = options.status;
+      // "New" excludes welcome-kit orders still awaiting approval — those live in
+      // the approvals queue, not the New shipping bucket.
+      if (options.status === OrderStatus.NEW) {
+        filter.approvalStatus = { $ne: ApprovalStatus.PENDING };
+      }
     }
 
     const sort: any = options.status === OrderStatus.DELIVERED
@@ -595,26 +634,64 @@ export class OrdersService {
     id: string,
     status: OrderStatus,
     trackingNumber?: string,
+    deliveryType?: BarcodeType,
   ): Promise<Order> {
     const now = new Date();
-    const update: any = {
-      status,
-      $push: { statusHistory: { status, at: now } },
-    };
-    if (status === OrderStatus.DELIVERED) {
-      update.deliveredAt = now;
+    const order = await this.orderModel.findById(id).exec();
+    if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
+
+    // Auto-assign a postal tracking barcode when an order is packed / made ready to
+    // ship (the "Pack" action moves NEW → PACKED). Idempotent (keeps an already-
+    // assigned barcode) and atomic (never shared across orders). Skipped when an
+    // explicit tracking number is supplied. If no barcode of the order's delivery
+    // type is available, the order still advances but is flagged `barcodePending`
+    // so it can be assigned once more are uploaded.
+    if (status === OrderStatus.PACKED && !(trackingNumber && trackingNumber.trim())) {
+      // Resolve the delivery type: an explicit choice at pack time (confirmation
+      // dialog) wins, otherwise the order's own type. NEVER default silently — a
+      // barcode is a real consignment, so an unset type must be chosen first.
+      const resolvedType = deliveryType || (order.deliveryType as BarcodeType | null);
+      if (!resolvedType) {
+        throw new BadRequestException(
+          'Choose a delivery type (Speed Post or Business Parcel) before packing this order',
+        );
+      }
+      if (deliveryType && deliveryType !== order.deliveryType) {
+        order.deliveryType = deliveryType;
+      }
+      const barcode = await this.barcodesService.assignToOrder(id, resolvedType);
+      if (barcode) {
+        order.trackingNumber = barcode.code;
+        order.barcodePending = false;
+      } else {
+        order.barcodePending = true;
+      }
     }
-    // Persist the courier tracking number entered at dispatch time.
-    if (trackingNumber) {
-      update.trackingNumber = trackingNumber.trim();
+
+    order.status = status;
+    if (status === OrderStatus.DELIVERED) order.deliveredAt = now;
+    // An explicit tracking number (e.g. entered at dispatch) overrides the barcode.
+    if (trackingNumber && trackingNumber.trim()) {
+      order.trackingNumber = trackingNumber.trim();
     }
-    const updatedOrder = await this.orderModel
-      .findByIdAndUpdate(id, update, { new: true })
-      .exec();
-    if (!updatedOrder) {
-      throw new NotFoundException(`Order with ID ${id} not found`);
+    if (!order.statusHistory) order.statusHistory = [] as any;
+    order.statusHistory.push({ status, at: now });
+    return order.save();
+  }
+
+  // Admin: change an order's delivery type before it is dispatched. A NEW order has
+  // no barcode yet — the barcode of the chosen type is claimed later when the order
+  // is packed & dispatched — so this simply records the delivery type. Rejected once
+  // the order has shipped (its barcode is on a real parcel and must not change).
+  async changeDeliveryType(id: string, newType: BarcodeType): Promise<Order> {
+    const order = await this.orderModel.findById(id).exec();
+    if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
+    if (order.status !== OrderStatus.NEW) {
+      throw new BadRequestException('Delivery type can only be changed before the order is dispatched');
     }
-    return updatedOrder;
+    if (order.deliveryType === newType) return order;
+    order.deliveryType = newType;
+    return order.save();
   }
 }
 

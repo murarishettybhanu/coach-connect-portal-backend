@@ -16,6 +16,7 @@ import { TrackingModule } from './modules/tracking/tracking.module';
 import { UploadsModule } from './modules/uploads/uploads.module';
 import { CatalogModule } from './modules/catalog/catalog.module';
 import { TribeKitsModule } from './modules/tribe-kits/tribe-kits.module';
+import { BarcodesModule } from './modules/barcodes/barcodes.module';
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { TribeKitsModule } from './modules/tribe-kits/tribe-kits.module';
     UploadsModule,
     CatalogModule,
     TribeKitsModule,
+    BarcodesModule,
   ],
   controllers: [AppController],
   providers: [

@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Schema as MongooseSchema } from 'mongoose';
+import { BarcodeType } from './barcode.schema';
 
 export enum CampaignType {
   WELCOME_KIT = 'WELCOME_KIT',
@@ -55,6 +56,16 @@ export class Campaign extends Document {
     default: CampaignFormType.WITH_ADDRESS,
   })
   formType: CampaignFormType;
+
+  // Postal service used for this campaign's orders — determines which barcode pool
+  // an order draws from when it's dispatched. Optional: when left unset the delivery
+  // type is chosen (and confirmed) at dispatch time instead of defaulting silently.
+  @Prop({
+    type: String,
+    enum: BarcodeType,
+    default: null,
+  })
+  deliveryType: BarcodeType | null;
 
   @Prop()
   description?: string;

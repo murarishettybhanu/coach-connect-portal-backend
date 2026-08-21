@@ -7,6 +7,7 @@ import { Campaign, CampaignSchema } from '../../schemas/campaign.schema';
 import { ProductsModule } from '../products/products.module';
 import { TransactionsModule } from '../transactions/transactions.module';
 import { TribesModule } from '../tribes/tribes.module';
+import { BarcodesModule } from '../barcodes/barcodes.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { TribesModule } from '../tribes/tribes.module';
     ProductsModule,
     TransactionsModule,
     TribesModule,
+    BarcodesModule,
   ],
   providers: [OrdersService],
   controllers: [OrdersController],

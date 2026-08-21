@@ -11,8 +11,10 @@ import {
   UseGuards,
   Request,
   ForbiddenException,
+  BadRequestException,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import { BarcodeType } from '../../schemas/barcode.schema';
 import { OrdersService } from './orders.service';
 import { TribesService } from '../tribes/tribes.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -184,8 +186,12 @@ export class OrdersController {
     @Param('id') id: string,
     @Body('status') status: OrderStatus,
     @Body('trackingNumber') trackingNumber?: string,
+    @Body('deliveryType') deliveryType?: BarcodeType,
   ) {
-    return this.ordersService.updateStatus(id, status, trackingNumber);
+    if (deliveryType && !Object.values(BarcodeType).includes(deliveryType)) {
+      throw new BadRequestException('Invalid delivery type');
+    }
+    return this.ordersService.updateStatus(id, status, trackingNumber, deliveryType);
   }
 
   @Patch(':id/approve')
@@ -255,6 +261,20 @@ export class OrdersController {
   @Roles(UserRole.ADMIN)
   restore(@Param('id') id: string) {
     return this.ordersService.restoreOrder(id);
+  }
+
+  // Admin: change delivery type of a PACKED order (swaps its barcode atomically).
+  @Patch(':id/delivery-type')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  changeDeliveryType(
+    @Param('id') id: string,
+    @Body('deliveryType') deliveryType: BarcodeType,
+  ) {
+    if (!Object.values(BarcodeType).includes(deliveryType)) {
+      throw new BadRequestException('Invalid delivery type');
+    }
+    return this.ordersService.changeDeliveryType(id, deliveryType);
   }
 }
 

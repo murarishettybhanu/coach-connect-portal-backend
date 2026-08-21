@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Schema as MongooseSchema } from 'mongoose';
+import { BarcodeType } from './barcode.schema';
 
 export enum OrderStatus {
   NEW = 'NEW',
@@ -95,6 +96,17 @@ export class Order extends Document {
   // details; the delivery address is attached later (address page or bulk upload).
   @Prop({ default: false })
   addressPending: boolean;
+
+  // Postal service for this order — inherited from the campaign when it sets one,
+  // otherwise unset until chosen (and confirmed) at dispatch. Changeable while the
+  // order is NEW. Determines which barcode pool is used when the order is dispatched.
+  @Prop({ type: String, enum: BarcodeType, default: null })
+  deliveryType: BarcodeType | null;
+
+  // True when the order was packed but no barcode of its delivery type was
+  // available — it needs a barcode assigned once more are uploaded.
+  @Prop({ default: false })
+  barcodePending: boolean;
 
   // Soft delete — hidden from all normal lists/pipeline; recoverable via restore.
   @Prop({ default: false })
