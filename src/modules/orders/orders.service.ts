@@ -29,8 +29,13 @@ const DISPATCH_TEMPLATE_ID = '2955234668146796';
 const DELIVERED_TEMPLATE_ID = '1419053503494614';
 
 // Both order templates were approved with an IMAGE header, so every send needs
-// one. The tribe's own logo when it has one, otherwise the platform mark served
-// by the frontend — a stable public URL Meta can fetch.
+// one, and Meta fetches it from a public URL at send time.
+//
+// Dispatch uses a fixed gift-box image (the same picture for every parcel);
+// delivery falls back to the tribe's own logo when it has one. Either can be
+// overridden by env without a deploy.
+const DISPATCH_IMAGE_URL =
+  'https://tribemerchandise.com/whatsapp-dispatch.jpg';
 const DEFAULT_ORDER_IMAGE_URL = 'https://tribemerchandise.com/tribe-logo.png';
 
 @Injectable()
@@ -836,9 +841,12 @@ export class OrdersService {
         'order';
 
       const logo = typeof coach.logoUrl === 'string' ? coach.logoUrl.trim() : '';
-      const headerImageUrl = logo.startsWith('https://')
-        ? logo
-        : process.env.WHATSAPP_ORDER_IMAGE_URL || DEFAULT_ORDER_IMAGE_URL;
+      const headerImageUrl =
+        status === OrderStatus.DISPATCHED
+          ? process.env.WHATSAPP_DISPATCH_IMAGE_URL || DISPATCH_IMAGE_URL
+          : logo.startsWith('https://')
+            ? logo
+            : process.env.WHATSAPP_ORDER_IMAGE_URL || DEFAULT_ORDER_IMAGE_URL;
 
       await this.whatsapp.sendTemplateByIdTo(
         phone,
