@@ -246,6 +246,17 @@ export class WhatsappApiService {
     };
   }
 
+  /**
+   * One template by its Meta id. The send API takes a *name* and language, so
+   * anything configured by id (the OTP template) has to be resolved first.
+   */
+  async getTemplateById(id: string): Promise<WhatsappTemplate> {
+    return this.request<WhatsappTemplate>(
+      `${id}?fields=id,name,language,category,status,components`,
+      { method: 'GET' },
+    );
+  }
+
   /** Message templates on the WABA, newest first as Meta returns them. */
   async listTemplates(): Promise<WhatsappTemplate[]> {
     const data = await this.request<{ data?: WhatsappTemplate[] }>(

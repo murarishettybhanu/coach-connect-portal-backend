@@ -15,6 +15,7 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { BarcodeType } from '../../schemas/barcode.schema';
+import { JwtService } from '@nestjs/jwt';
 import { OrdersService } from './orders.service';
 import { TribesService } from '../tribes/tribes.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -31,7 +32,24 @@ export class OrdersController {
   constructor(
     private readonly ordersService: OrdersService,
     private readonly tribesService: TribesService,
+    private readonly jwtService: JwtService,
   ) {}
+
+  /**
+   * The two public write routes below are also used by signed-in staff. A valid
+   * session exempts the caller from the WhatsApp verification a public
+   * submission needs; a missing or invalid token just means "not trusted".
+   */
+  private isSignedIn(req: { headers?: { authorization?: string } }): boolean {
+    const header = req.headers?.authorization;
+    if (!header?.startsWith('Bearer ')) return false;
+    try {
+      this.jwtService.verify(header.slice('Bearer '.length));
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   @Get('me')
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -53,8 +71,8 @@ export class OrdersController {
   }
 
   @Post()
-  create(@Body() orderData: CreateOrderDto) {
-    return this.ordersService.create(orderData);
+  create(@Body() orderData: CreateOrderDto, @Request() req) {
+    return this.ordersService.create(orderData, { trusted: this.isSignedIn(req) });
   }
 
   // Public: step-2 lookup — does an address-pending claim exist for this phone?
@@ -70,11 +88,12 @@ export class OrdersController {
   // Public: attach a delivery address to address-pending claim(s) by campaign + phone.
   @Post('attach-address')
   @Throttle({ default: { limit: 15, ttl: 60000 } })
-  attachAddress(@Body() dto: AttachAddressDto) {
+  attachAddress(@Body() dto: AttachAddressDto, @Request() req) {
     return this.ordersService.attachAddressByPhone(
       dto.campaignId,
       dto.phone,
       dto.address,
+      { trusted: this.isSignedIn(req), otpToken: dto.otpToken },
     );
   }
 

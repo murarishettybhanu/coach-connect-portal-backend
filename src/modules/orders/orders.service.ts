@@ -10,6 +10,7 @@ import { TransactionsService } from '../transactions/transactions.service';
 import { TransactionType } from '../../schemas/transaction.schema';
 import { BarcodesService } from '../barcodes/barcodes.service';
 import { BarcodeType } from '../../schemas/barcode.schema';
+import { WhatsappOtpService } from '../whatsapp/whatsapp-otp.service';
 
 @Injectable()
 export class OrdersService {
@@ -19,14 +20,23 @@ export class OrdersService {
     private productsService: ProductsService,
     private transactionsService: TransactionsService,
     private barcodesService: BarcodesService,
+    private otpService: WhatsappOtpService,
   ) {}
 
   // Public endpoint — NEVER trust client-supplied coachId / type / prices.
   // The campaign (or the products themselves) is the source of truth; this
   // prevents forged orders that mint commission to arbitrary tribes.
-  async create(orderData: any): Promise<Order> {
+  async create(orderData: any, opts: { trusted?: boolean } = {}): Promise<Order> {
     const rawItems: any[] = orderData.items || [];
     if (!rawItems.length) throw new BadRequestException('Order has no items');
+
+    // Campaign claims come from public forms where the phone number is the only
+    // identity we have, so it has to be proven over WhatsApp. `trusted` covers
+    // signed-in staff, who never see a claim form.
+    if (orderData.campaignId && !opts.trusted) {
+      this.requireVerifiedPhone(orderData.otpToken, orderData.shippingAddress?.phone);
+      this.validatePublicAddress(orderData.shippingAddress);
+    }
 
     // If a campaign is referenced, it dictates coach, type, and per-item prices.
     let campaign: any = null;
@@ -234,7 +244,68 @@ export class OrdersService {
 
   // Public: fill the delivery address on ALL address-pending claims matching
   // campaign + phone. Never touches already-completed (addressPending:false) orders.
-  async attachAddressByPhone(campaignId: string, phone: string, address: any) {
+  /**
+   * Postal rules for addresses typed into the public forms. Mirrors the
+   * client-side checks so the API can't be used to skip them — a bad address
+   * here becomes a parcel that ships and comes back.
+   */
+  private validatePublicAddress(address: any) {
+    if (!/^[6-9]\d{9}$/.test(String(address?.phone ?? ''))) {
+      throw new BadRequestException(
+        'Enter a valid 10-digit mobile number starting with 6-9',
+      );
+    }
+
+    // Contact-only claims ("without address" campaigns) have no postal fields
+    // yet; they're checked when the address is attached later.
+    if (!address?.addressLine1) return;
+
+    if (String(address.addressLine2 ?? '').trim().length < 10) {
+      throw new BadRequestException(
+        'Area / Street needs at least 10 characters — include the locality',
+      );
+    }
+    if (!String(address.landmark ?? '').trim()) {
+      throw new BadRequestException('Landmark is required');
+    }
+    if (!String(address.sectorVillage ?? '').trim()) {
+      throw new BadRequestException('Sector / Village is required');
+    }
+  }
+
+  /**
+   * Rejects unless the caller holds a valid proof token for this phone number,
+   * issued by the WhatsApp OTP flow the public forms go through.
+   */
+  private requireVerifiedPhone(otpToken: string | undefined, phone: string) {
+    if (!otpToken) {
+      throw new BadRequestException(
+        'Verify your WhatsApp number before submitting this form',
+      );
+    }
+    const proof = this.otpService.checkProof(otpToken, phone);
+    if (!proof.ok) {
+      throw new BadRequestException(
+        proof.reason === 'number-mismatch'
+          ? 'The verified number does not match the number on this form'
+          : 'Your verification has expired — verify your WhatsApp number again',
+      );
+    }
+  }
+
+  async attachAddressByPhone(
+    campaignId: string,
+    phone: string,
+    address: any,
+    opts: { trusted?: boolean; otpToken?: string } = {},
+  ) {
+    // This decides where someone else's kit ships, so a phone number alone is
+    // not enough.
+    if (!opts.trusted) {
+      this.requireVerifiedPhone(opts.otpToken, phone);
+      this.validatePublicAddress({ ...address, phone });
+    }
+
     const cleanPhone = String(phone || '').trim();
     const orders = await this.orderModel
       .find({ campaignId, addressPending: true, 'shippingAddress.phone': cleanPhone, isDeleted: { $ne: true } } as any)

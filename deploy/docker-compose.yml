@@ -27,6 +27,7 @@ services:
       WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
       WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
       WHATSAPP_WABA_ID: ${WHATSAPP_WABA_ID:-}
+      WHATSAPP_OTP_TEMPLATE_ID: ${WHATSAPP_OTP_TEMPLATE_ID:-1655357342876479}
       # Keep Node heap under the container mem_limit to avoid OOM on the 1GB box.
       NODE_OPTIONS: "--max-old-space-size=320"
     mem_limit: 400m

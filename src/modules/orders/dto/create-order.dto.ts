@@ -108,6 +108,12 @@ export class CreateOrderDto {
   @Type(() => ShippingAddressDto)
   shippingAddress: ShippingAddressDto;
 
+  // Proof that the phone number was verified over WhatsApp. Required for
+  // campaign claims submitted by the public forms; see OrdersService.create.
+  @IsOptional()
+  @IsString()
+  otpToken?: string;
+
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })

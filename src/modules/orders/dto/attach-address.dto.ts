@@ -24,13 +24,15 @@ export class FullAddressDto {
   @IsString()
   addressLine2?: string;
 
-  @IsOptional()
+  // Mandatory on the public forms — Indian deliveries fail far more often
+  // without a landmark, and rural addresses need the sector/village.
+  @IsNotEmpty()
   @IsString()
-  landmark?: string;
+  landmark: string;
 
-  @IsOptional()
+  @IsNotEmpty()
   @IsString()
-  sectorVillage?: string;
+  sectorVillage: string;
 
   @IsNotEmpty()
   @IsString()
@@ -70,6 +72,13 @@ export class AttachAddressDto {
   @ValidateNested()
   @Type(() => FullAddressDto)
   address: FullAddressDto;
+
+  // Proof the phone number was verified over WhatsApp — this endpoint sets
+  // where someone else's kit ships, so it can't be open to anyone with a
+  // phone number.
+  @IsOptional()
+  @IsString()
+  otpToken?: string;
 }
 
 // Tribe/Admin bulk PATCH of a specific claim's address. The claim already carries

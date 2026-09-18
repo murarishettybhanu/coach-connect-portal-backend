@@ -52,6 +52,9 @@ CORS is restricted to the frontend origins in `CORS_ORIGINS`. Also live in `main
   the acknowledgement is skipped with a warning
 - `WHATSAPP_WABA_ID` — WhatsApp Business Account id; required for template endpoints only
 - `WHATSAPP_API_VERSION` — Graph version, defaults to `v21.0`
+- `WHATSAPP_OTP_TEMPLATE_ID` — Meta **template id** for the authentication template
+  that delivers verification codes (defaults to `1655357342876479`). Resolved to a
+  name/language once at runtime and cached, since the send API takes a name
 
 > Secrets live only in GitHub Actions secrets + the VM's gitignored `.env`. Never commit them.
 
@@ -220,6 +223,28 @@ allowed within 24h of the customer's last message; outside it Meta accepts only
 approved templates. `replyTo` refuses early with an explanation rather than
 letting the Graph call fail. Templates are **not** stored locally — the endpoints
 proxy the Graph API so the review status shown is always current.
+
+### WhatsApp OTP on the public campaign forms (`whatsapp-otp.service.ts`)
+The claim form and the address step both verify the customer's number before
+they will submit. Codes are 6 digits, **bcrypt-hashed** (never stored in the
+clear), expire in 10 minutes, allow 5 guesses, and can't be re-sent within 60s;
+the endpoints are throttled far below the global ceiling because every request
+costs a real WhatsApp message. Every failure mode returns the *same* message —
+telling a caller which part was wrong helps them enumerate numbers.
+
+Postal rules for the public forms live in `validatePublicAddress` (phone must be
+10 digits starting 6-9; Area/Street at least 10 characters; Landmark and
+Sector/Village required) and run server-side for untrusted callers, mirroring
+the form. The forms also show a **label preview** before submitting —
+`AddressLabelPreview` mirrors `ShippingLabelOverlay`'s field order, so keep the
+two in step.
+
+Verification returns a **signed proof token** (JWT, 30 min, same `JWT_SECRET`),
+not a boolean: `POST /orders` (for campaign claims) and `POST /orders/attach-address`
+require it and check it matches the phone on the submission, so the gate can't be
+skipped by calling the API directly. Signed-in callers are exempt — `isSignedIn`
+in `orders.controller.ts` — which keeps the admin CSV importer working. Storefront
+checkout carries no `campaignId` and is unaffected.
 
 ## Known issues / tech debt
 
