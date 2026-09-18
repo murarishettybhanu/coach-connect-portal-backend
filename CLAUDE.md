@@ -195,6 +195,13 @@ timezone (`Intl.DateTimeFormat`) rather than the server's — the box runs UTC a
 the business runs on IST; a close time before the open time means an overnight
 shift. A bad timezone string is treated as "open" rather than silencing the reply.
 
+`POST /whatsapp/conversations/:contact/template` doubles as "start a new
+conversation": a template is the only message WhatsApp lets you *open* with, so
+the `:contact` there may be a number that has never written in. It runs through
+`normalizeContact` (digits only, bare 10-digit numbers assumed Indian), and the
+inbox sorts on `updatedAt` rather than `lastInboundAt` so a thread we started
+doesn't sink to the bottom for want of an inbound message.
+
 **Inbound media is proxied, never linked.** Meta's media URLs expire in minutes
 *and* need the bearer token, so `GET /whatsapp/media/:mediaId` resolves the id
 and streams the bytes; the admin UI fetches it as a blob because an `<img src>`

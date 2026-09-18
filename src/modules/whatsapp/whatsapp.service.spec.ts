@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getModelToken } from '@nestjs/mongoose';
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { createHmac } from 'crypto';
 import { WhatsappService, WhatsappWebhookPayload } from './whatsapp.service';
 import { WhatsappMessage } from '../../schemas/whatsapp-message.schema';
@@ -151,6 +151,30 @@ describe('WhatsappService', () => {
     it('rejects a missing signature header', () => {
       expect(() => service.assertValidSignature(body, undefined)).toThrow(
         ForbiddenException,
+      );
+    });
+  });
+
+  describe('normalizeContact', () => {
+    it('adds the Indian country code to a bare 10-digit number', () => {
+      expect(service.normalizeContact('9876543210')).toBe('919876543210');
+    });
+
+    it('strips punctuation, spaces and the leading +', () => {
+      expect(service.normalizeContact('+91 98765-43210')).toBe('919876543210');
+    });
+
+    it('drops the domestic trunk 0', () => {
+      expect(service.normalizeContact('09876543210')).toBe('919876543210');
+    });
+
+    it('leaves a number that already has a country code alone', () => {
+      expect(service.normalizeContact('14155552671')).toBe('14155552671');
+    });
+
+    it('rejects something too short to be a phone number', () => {
+      expect(() => service.normalizeContact('12345')).toThrow(
+        BadRequestException,
       );
     });
   });

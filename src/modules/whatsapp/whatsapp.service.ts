@@ -344,7 +344,9 @@ export class WhatsappService {
   > {
     const conversations = await this.conversationModel
       .find()
-      .sort({ lastInboundAt: -1 })
+      // updatedAt, not lastInboundAt: a conversation we started with a template
+      // has no inbound message yet and would otherwise sort to the bottom.
+      .sort({ updatedAt: -1 })
       .limit(200)
       .lean()
       .exec();
@@ -387,6 +389,30 @@ export class WhatsappService {
   }
 
   /**
+   * Accepts a number the way a human types it and returns a wa_id — digits
+   * only, country code included, which is the only form Meta takes.
+   *
+   * A bare 10-digit number is assumed Indian, since that's the whole customer
+   * base; anything already carrying a country code is left alone.
+   */
+  normalizeContact(raw: string): string {
+    const digits = (raw || '').replace(/\D/g, '');
+
+    // "09876543210" — the trunk prefix people dial domestically.
+    const trimmed =
+      digits.length === 11 && digits.startsWith('0') ? digits.slice(1) : digits;
+
+    const withCountry = trimmed.length === 10 ? `91${trimmed}` : trimmed;
+
+    if (withCountry.length < 10 || withCountry.length > 15) {
+      throw new BadRequestException(
+        `"${raw}" is not a valid WhatsApp number. Include the country code, e.g. +91 98765 43210.`,
+      );
+    }
+    return withCountry;
+  }
+
+  /**
    * Sends an approved template. Always allowed — this is how you reach someone
    * after the 24-hour window has closed.
    *
@@ -396,9 +422,12 @@ export class WhatsappService {
    * ahead and the row falls back to naming the template.
    */
   async sendTemplateTo(
-    contact: string,
+    rawContact: string,
     input: SendTemplateInput,
   ): Promise<WhatsappMessage> {
+    // A template can open a conversation with someone who has never written
+    // in, so this is where numbers typed by hand first reach us.
+    const contact = this.normalizeContact(rawContact);
     const now = new Date();
     const rendered = await this.renderTemplate(input);
 
