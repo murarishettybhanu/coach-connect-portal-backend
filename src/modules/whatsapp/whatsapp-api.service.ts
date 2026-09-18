@@ -28,6 +28,12 @@ export interface SendTemplateInput {
   /** Values for the template's {{1}}, {{2}} … body placeholders, in order. */
   parameters?: string[];
   /**
+   * Values for a template written with *named* placeholders ({{customer_name}}).
+   * Meta treats the two styles differently on the wire, so a template declares
+   * one or the other and the caller supplies the matching shape.
+   */
+  namedParameters?: Record<string, string>;
+  /**
    * Set for AUTHENTICATION templates. They need the passcode repeated in a
    * button component as well as the body — without it Meta rejects the send,
    * since the copy-code button has nothing to copy.
@@ -156,8 +162,20 @@ export class WhatsappApiService {
     input: SendTemplateInput,
   ): Promise<SendTextResult> {
     const components: Record<string, unknown>[] = [];
+    const named = input.namedParameters
+      ? Object.entries(input.namedParameters)
+      : [];
 
-    if (input.parameters?.length) {
+    if (named.length) {
+      components.push({
+        type: 'body',
+        parameters: named.map(([parameter_name, text]) => ({
+          type: 'text',
+          parameter_name,
+          text,
+        })),
+      });
+    } else if (input.parameters?.length) {
       components.push({
         type: 'body',
         parameters: input.parameters.map((text) => ({ type: 'text', text })),

@@ -93,7 +93,11 @@ export class OrdersController {
       dto.campaignId,
       dto.phone,
       dto.address,
-      { trusted: this.isSignedIn(req), otpToken: dto.otpToken },
+      {
+        trusted: this.isSignedIn(req),
+        otpToken: dto.otpToken,
+        termsAccepted: dto.termsAccepted,
+      },
     );
   }
 

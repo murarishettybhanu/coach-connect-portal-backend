@@ -70,6 +70,12 @@ export class Campaign extends Document {
   @Prop()
   description?: string;
 
+  // Shown on the "thank you" screen after someone submits the claim form.
+  // Blank falls back to the standard copy in the form. Capped because this
+  // module takes untyped input — there's no DTO on campaigns.
+  @Prop({ maxlength: 600 })
+  successMessage?: string;
+
   // Optional shipping metadata for the kit/parcel (dimensions in cm, weight in grams).
   @Prop()
   length?: number;

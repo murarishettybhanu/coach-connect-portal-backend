@@ -95,6 +95,11 @@ export class Order extends Document {
     email?: string;
   };
 
+  // When the customer ticked the delivery-details agreement on the public form.
+  // Kept as a timestamp, not a flag, so a dispute has a date attached.
+  @Prop()
+  termsAcceptedAt?: Date;
+
   // True for "without address" campaign claims where step 1 captured only contact
   // details; the delivery address is attached later (address page or bulk upload).
   @Prop({ default: false })

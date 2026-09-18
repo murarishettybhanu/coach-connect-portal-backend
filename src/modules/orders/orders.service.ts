@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, isValidObjectId } from 'mongoose';
 import type { Response } from 'express';
@@ -11,9 +16,22 @@ import { TransactionType } from '../../schemas/transaction.schema';
 import { BarcodesService } from '../barcodes/barcodes.service';
 import { BarcodeType } from '../../schemas/barcode.schema';
 import { WhatsappOtpService } from '../whatsapp/whatsapp-otp.service';
+import { WhatsappService } from '../whatsapp/whatsapp.service';
+
+// A rejected claim is dead: no dispatch, no commission. Order listings exclude
+// them so the tables only hold work that still matters. `$ne` also matches the
+// null/absent approvalStatus that store sales carry.
+const NOT_REJECTED = { approvalStatus: { $ne: ApprovalStatus.REJECTED } };
+
+// Approved WhatsApp templates that tell a customer where their parcel is.
+// Overridable by env so a re-approved template can be swapped without a deploy.
+const DISPATCH_TEMPLATE_ID = '2955234668146796';
+const DELIVERED_TEMPLATE_ID = '1419053503494614';
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
     @InjectModel(Order.name) private orderModel: Model<Order>,
     @InjectModel(Campaign.name) private campaignModel: Model<Campaign>,
@@ -21,6 +39,7 @@ export class OrdersService {
     private transactionsService: TransactionsService,
     private barcodesService: BarcodesService,
     private otpService: WhatsappOtpService,
+    private whatsapp: WhatsappService,
   ) {}
 
   // Public endpoint — NEVER trust client-supplied coachId / type / prices.
@@ -164,6 +183,7 @@ export class OrdersService {
     const order = new this.orderModel({
       coachId,
       campaignId: orderData.campaignId,
+      ...(orderData.termsAccepted ? { termsAcceptedAt: new Date() } : {}),
       type,
       // Inherit the campaign's delivery type only when it set one; otherwise leave
       // it unset (store sales + campaigns with no type) so it must be chosen at dispatch.
@@ -303,7 +323,7 @@ export class OrdersService {
     campaignId: string,
     phone: string,
     address: any,
-    opts: { trusted?: boolean; otpToken?: string } = {},
+    opts: { trusted?: boolean; otpToken?: string; termsAccepted?: boolean } = {},
   ) {
     // This decides where someone else's kit ships, so a phone number alone is
     // not enough.
@@ -321,6 +341,7 @@ export class OrdersService {
     }
     for (const order of orders) {
       order.shippingAddress = this.mergeAddress(order.shippingAddress, address);
+      if (opts.termsAccepted) order.termsAcceptedAt = new Date();
       order.addressPending = false;
       order.markModified('shippingAddress');
       await order.save();
@@ -434,7 +455,7 @@ export class OrdersService {
       .find(filter)
       .sort({ deletedAt: -1 })
       .populate('items.productId')
-      .populate('campaignId', 'name type')
+      .populate('campaignId', 'name type packageWeight length breadth height')
       .exec();
   }
 
@@ -559,11 +580,11 @@ export class OrdersService {
   }
 
   async findAll(): Promise<Order[]> {
-    return this.orderModel.find({ isDeleted: { $ne: true } } as any).sort({ createdAt: -1 }).populate('coachId').populate('items.productId').populate('campaignId', 'name type').exec();
+    return this.orderModel.find({ ...NOT_REJECTED, isDeleted: { $ne: true } } as any).sort({ createdAt: -1 }).populate('coachId').populate('items.productId').populate('campaignId', 'name type packageWeight length breadth height').exec();
   }
 
   async findByCoach(coachId: string): Promise<Order[]> {
-    return this.orderModel.find({ coachId, isDeleted: { $ne: true } } as any).sort({ createdAt: -1 }).populate('items.productId').populate('campaignId', 'name type').exec();
+    return this.orderModel.find({ ...NOT_REJECTED, coachId, isDeleted: { $ne: true } } as any).sort({ createdAt: -1 }).populate('items.productId').populate('campaignId', 'name type packageWeight length breadth height').exec();
   }
 
   async findByCoachPaginated(
@@ -580,7 +601,7 @@ export class OrdersService {
     const limit = Math.min(100, Math.max(1, Number(options.limit) || 10));
     const skip = (page - 1) * limit;
 
-    const filter: any = { coachId, isDeleted: { $ne: true } };
+    const filter: any = { ...NOT_REJECTED, coachId, isDeleted: { $ne: true } };
 
     if (options.status) {
       filter.status = options.status;
@@ -619,7 +640,7 @@ export class OrdersService {
         .skip(skip)
         .limit(limit)
         .populate('items.productId')
-        .populate('campaignId', 'name type')
+        .populate('campaignId', 'name type packageWeight length breadth height')
         .exec(),
       this.orderModel.countDocuments(filter).exec(),
     ]);
@@ -647,7 +668,7 @@ export class OrdersService {
     const limit = Math.min(100, Math.max(1, Number(options.limit) || 10));
     const skip = (page - 1) * limit;
 
-    const filter: any = { isDeleted: { $ne: true } };
+    const filter: any = { ...NOT_REJECTED, isDeleted: { $ne: true } };
     if (options.status) {
       filter.status = options.status;
       // "New" excludes welcome-kit orders still awaiting approval — those live in
@@ -685,7 +706,7 @@ export class OrdersService {
         .limit(limit)
         .populate('items.productId')
         .populate({ path: 'coachId', populate: { path: 'userId', select: 'name email' } })
-        .populate('campaignId', 'name type')
+        .populate('campaignId', 'name type packageWeight length breadth height')
         .exec(),
       this.orderModel.countDocuments(filter).exec(),
     ]);
@@ -745,6 +766,7 @@ export class OrdersService {
       }
     }
 
+    const previousStatus = order.status;
     order.status = status;
     if (status === OrderStatus.DELIVERED) order.deliveredAt = now;
     // An explicit tracking number (e.g. entered at dispatch) overrides the barcode.
@@ -753,7 +775,74 @@ export class OrdersService {
     }
     if (!order.statusHistory) order.statusHistory = [] as any;
     order.statusHistory.push({ status, at: now });
-    return order.save();
+    const saved = await order.save();
+
+    // Only on a real transition — re-saving an already-dispatched order must not
+    // message the customer twice. Deliberately not awaited: a slow Graph call
+    // shouldn't hold up the admin's status change, and bulk dispatch would
+    // otherwise serialise one network round trip per order.
+    if (status !== previousStatus) {
+      void this.notifyCustomerOfStatus(id, status);
+    }
+    return saved;
+  }
+
+  /**
+   * Tells the customer their parcel has shipped or arrived, over WhatsApp.
+   *
+   * Never throws: a messaging failure must not look like a failed status
+   * update. Templates are allowed outside the 24-hour window, which is the
+   * whole reason these are templates and not free-form messages.
+   */
+  private async notifyCustomerOfStatus(
+    orderId: string,
+    status: OrderStatus,
+  ): Promise<void> {
+    const templateId =
+      status === OrderStatus.DISPATCHED
+        ? process.env.WHATSAPP_DISPATCH_TEMPLATE_ID || DISPATCH_TEMPLATE_ID
+        : status === OrderStatus.DELIVERED
+          ? process.env.WHATSAPP_DELIVERED_TEMPLATE_ID || DELIVERED_TEMPLATE_ID
+          : null;
+    if (!templateId) return;
+
+    if (!this.whatsapp.canSend) {
+      this.logger.warn(
+        `WhatsApp is not configured — skipping the ${status} notification for ${orderId}`,
+      );
+      return;
+    }
+
+    try {
+      const order: any = await this.orderModel
+        .findById(orderId)
+        .populate('coachId')
+        .populate('campaignId', 'name')
+        .populate('items.productId', 'name')
+        .exec();
+
+      const phone = order?.shippingAddress?.phone;
+      if (!phone) return;
+
+      const coach = order.coachId || {};
+      const kitName =
+        order.campaignId?.name ||
+        order.items?.[0]?.productId?.name ||
+        'order';
+
+      await this.whatsapp.sendTemplateByIdTo(phone, templateId, {
+        customer_name: order.shippingAddress?.fullName || 'there',
+        client_brand: coach.brand || coach.name || 'Tribe Merchandise',
+        kit_name: kitName,
+        // Meta rejects an empty parameter, so never send a blank tracking id.
+        tracking_id: order.trackingNumber || 'Shared soon',
+      });
+      this.logger.log(`Sent the ${status} WhatsApp update for order ${orderId}`);
+    } catch (err) {
+      this.logger.error(
+        `Could not send the ${status} WhatsApp update for order ${orderId}: ${(err as Error).message}`,
+      );
+    }
   }
 
   // Admin: change an order's delivery type before it is dispatched. A NEW order has

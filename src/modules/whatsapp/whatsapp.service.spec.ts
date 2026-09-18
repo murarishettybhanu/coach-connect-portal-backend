@@ -59,6 +59,7 @@ describe('WhatsappService', () => {
   let sendText: jest.Mock;
   let sendTemplate: jest.Mock;
   let listTemplates: jest.Mock;
+  let getTemplateById: jest.Mock;
   let settings: Record<string, unknown>;
 
   beforeEach(async () => {
@@ -71,6 +72,7 @@ describe('WhatsappService', () => {
     findOneAndUpdate = jest.fn().mockResolvedValue({ contact: '919876543210' });
     sendText = jest.fn().mockResolvedValue({ waMessageId: 'wamid.out1' });
     sendTemplate = jest.fn().mockResolvedValue({ waMessageId: 'wamid.tpl1' });
+    getTemplateById = jest.fn();
     listTemplates = jest.fn().mockResolvedValue([
       {
         id: '1',
@@ -121,7 +123,13 @@ describe('WhatsappService', () => {
         },
         {
           provide: WhatsappApiService,
-          useValue: { sendText, sendTemplate, listTemplates, canSend: true },
+          useValue: {
+            sendText,
+            sendTemplate,
+            listTemplates,
+            getTemplateById,
+            canSend: true,
+          },
         },
       ],
     }).compile();
@@ -233,6 +241,117 @@ describe('WhatsappService', () => {
       expect(sendTemplate).toHaveBeenCalledTimes(1);
       const created = (create.mock.calls[0] as [Record<string, unknown>])[0];
       expect(created.text).toBe('[template: order_dispatched]');
+    });
+  });
+
+  describe('sendTemplateByIdTo', () => {
+    // The dispatch template Meta holds, written with named placeholders.
+    const namedTemplate = {
+      id: '2955234668146796',
+      name: 'order_dispatched',
+      language: 'en',
+      category: 'UTILITY',
+      status: 'APPROVED',
+      components: [
+        {
+          type: 'BODY',
+          text: 'Hello {{customer_name}}, your {{kit_name}} from {{client_brand}} shipped. Tracking: {{tracking_id}}',
+        },
+      ],
+    };
+
+    it('sends named parameters for a template written with named placeholders', async () => {
+      getTemplateById.mockResolvedValueOnce(namedTemplate);
+      listTemplates.mockResolvedValueOnce([namedTemplate]);
+
+      await service.sendTemplateByIdTo('919876543210', '2955234668146796', {
+        customer_name: 'Asha',
+        client_brand: 'Mudgar Girl',
+        kit_name: 'Welcome Kit',
+        tracking_id: 'EX123456789IN',
+      });
+
+      const [, input] = sendTemplate.mock.calls[0] as [
+        string,
+        { namedParameters?: Record<string, string>; parameters?: string[] },
+      ];
+      expect(input.parameters).toBeUndefined();
+      expect(input.namedParameters).toEqual({
+        customer_name: 'Asha',
+        client_brand: 'Mudgar Girl',
+        kit_name: 'Welcome Kit',
+        tracking_id: 'EX123456789IN',
+      });
+    });
+
+    it('drops a value the template has no placeholder for', async () => {
+      const delivered = {
+        ...namedTemplate,
+        id: '1419053503494614',
+        name: 'order_delivered',
+        components: [
+          { type: 'BODY', text: 'Hello {{customer_name}}, your {{kit_name}} from {{client_brand}} arrived.' },
+        ],
+      };
+      getTemplateById.mockResolvedValueOnce(delivered);
+      listTemplates.mockResolvedValueOnce([delivered]);
+
+      await service.sendTemplateByIdTo('919876543210', '1419053503494614', {
+        customer_name: 'Asha',
+        client_brand: 'Mudgar Girl',
+        kit_name: 'Welcome Kit',
+        // The delivered template shows no tracking id — sending it anyway is
+        // rejected by Meta as an unknown parameter.
+        tracking_id: 'EX123456789IN',
+      });
+
+      const [, input] = sendTemplate.mock.calls[0] as [
+        string,
+        { namedParameters?: Record<string, string> },
+      ];
+      expect(Object.keys(input.namedParameters ?? {})).toEqual([
+        'customer_name',
+        'kit_name',
+        'client_brand',
+      ]);
+    });
+
+    it('falls back to positional parameters for a numbered template', async () => {
+      const numbered = {
+        ...namedTemplate,
+        components: [{ type: 'BODY', text: 'Hi {{1}}, your {{2}} shipped.' }],
+      };
+      getTemplateById.mockResolvedValueOnce(numbered);
+      listTemplates.mockResolvedValueOnce([numbered]);
+
+      await service.sendTemplateByIdTo('919876543210', '2955234668146796', {
+        customer_name: 'Asha',
+        kit_name: 'Welcome Kit',
+      });
+
+      const [, input] = sendTemplate.mock.calls[0] as [
+        string,
+        { namedParameters?: Record<string, string>; parameters?: string[] },
+      ];
+      expect(input.namedParameters).toBeUndefined();
+      expect(input.parameters).toEqual(['Asha', 'Welcome Kit']);
+    });
+
+    it('records the rendered message in the thread', async () => {
+      getTemplateById.mockResolvedValueOnce(namedTemplate);
+      listTemplates.mockResolvedValueOnce([namedTemplate]);
+
+      await service.sendTemplateByIdTo('919876543210', '2955234668146796', {
+        customer_name: 'Asha',
+        client_brand: 'Mudgar Girl',
+        kit_name: 'Welcome Kit',
+        tracking_id: 'EX123456789IN',
+      });
+
+      const created = (create.mock.calls[0] as [Record<string, unknown>])[0];
+      expect(created.text).toBe(
+        'Hello Asha, your Welcome Kit from Mudgar Girl shipped. Tracking: EX123456789IN',
+      );
     });
   });
 

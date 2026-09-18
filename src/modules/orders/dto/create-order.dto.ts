@@ -1,4 +1,5 @@
 import {
+  IsBoolean,
   IsArray,
   IsEmail,
   IsEnum,
@@ -118,6 +119,11 @@ export class CreateOrderDto {
   @IsOptional()
   @IsString()
   otpToken?: string;
+
+  // The customer ticked the delivery-details agreement on the form.
+  @IsOptional()
+  @IsBoolean()
+  termsAccepted?: boolean;
 
   @IsArray()
   @ArrayMinSize(1)

@@ -1,4 +1,5 @@
 import {
+  IsBoolean,
   IsEmail,
   IsMongoId,
   IsNotEmpty,
@@ -84,6 +85,11 @@ export class AttachAddressDto {
   @IsOptional()
   @IsString()
   otpToken?: string;
+
+  // The customer ticked the delivery-details agreement on the address form.
+  @IsOptional()
+  @IsBoolean()
+  termsAccepted?: boolean;
 }
 
 // Tribe/Admin bulk PATCH of a specific claim's address. The claim already carries

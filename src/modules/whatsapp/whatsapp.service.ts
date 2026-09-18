@@ -339,6 +339,11 @@ export class WhatsappService {
       .exec();
   }
 
+  /** Whether outbound messaging is configured at all. */
+  get canSend(): boolean {
+    return this.api.canSend;
+  }
+
   /** Inbox list: every conversation, most recently active first. */
   async listConversations(): Promise<
     Array<Record<string, unknown> & { windowOpen: boolean }>
@@ -509,6 +514,54 @@ export class WhatsappService {
     }
   }
 
+  /**
+   * Sends a template identified by its Meta **id**, with values supplied by
+   * name: `{ customer_name: "Asha", tracking_id: "EX123" }`.
+   *
+   * Templates come in two flavours — numbered ({{1}}) and named
+   * ({{customer_name}}) — and Meta wants a different payload for each. Rather
+   * than make every caller know which, this reads the template's own body and
+   * maps the values accordingly: by name, or positionally in the order the
+   * placeholders appear.
+   */
+  async sendTemplateByIdTo(
+    contact: string,
+    templateId: string,
+    values: Record<string, string>,
+  ): Promise<WhatsappMessage> {
+    const template = await this.api.getTemplateById(templateId);
+    const body = (template.components ?? []).find(
+      (c) => (c as { type?: string }).type === 'BODY',
+    ) as { text?: string } | undefined;
+
+    const placeholders = [
+      ...(body?.text ?? '').matchAll(/\{\{\s*([\w]+)\s*\}\}/g),
+    ].map((m) => m[1]);
+
+    const numbered = placeholders.length > 0 && placeholders.every((p) => /^\d+$/.test(p));
+
+    const input: SendTemplateInput = numbered
+      ? {
+          name: template.name,
+          language: template.language,
+          // Positional: fill in the order the placeholders appear.
+          parameters: Object.values(values),
+        }
+      : {
+          name: template.name,
+          language: template.language,
+          // Named: only what this template actually asks for, so an extra value
+          // (a tracking id on a template that doesn't show one) is not sent.
+          namedParameters: Object.fromEntries(
+            placeholders
+              .filter((key) => values[key] !== undefined)
+              .map((key) => [key, values[key]]),
+          ),
+        };
+
+    return this.sendTemplateTo(contact, input);
+  }
+
   /** Fills a template's body with the given parameters, for the thread view. */
   private renderTemplate(
     input: SendTemplateInput,
@@ -525,8 +578,9 @@ export class WhatsappService {
         : `[template: ${input.name}]`;
     }
 
-    return body.text.replace(/\{\{(\d+)\}\}/g, (whole, index: string) => {
-      return input.parameters?.[Number(index) - 1] ?? whole;
+    return body.text.replace(/\{\{\s*([\w]+)\s*\}\}/g, (whole, key: string) => {
+      if (/^\d+$/.test(key)) return input.parameters?.[Number(key) - 1] ?? whole;
+      return input.namedParameters?.[key] ?? whole;
     });
   }
 
