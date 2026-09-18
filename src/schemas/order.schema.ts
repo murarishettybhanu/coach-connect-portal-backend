@@ -89,6 +89,9 @@ export class Order extends Document {
     state: string;
     pincode: string;
     phone: string;
+    // Second number to call if the WhatsApp number doesn't take calls — the
+    // courier uses this, so it prints on the label when present.
+    alternatePhone?: string;
     email?: string;
   };
 

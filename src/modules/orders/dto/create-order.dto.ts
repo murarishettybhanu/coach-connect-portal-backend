@@ -59,6 +59,11 @@ export class ShippingAddressDto {
   @IsString()
   phone: string;
 
+  // Optional second number for the courier.
+  @IsOptional()
+  @IsString()
+  alternatePhone?: string;
+
   @IsOptional()
   @IsEmail()
   email?: string;

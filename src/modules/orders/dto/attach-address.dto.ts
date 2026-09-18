@@ -54,6 +54,11 @@ export class FullAddressDto {
   @IsString()
   phone: string;
 
+  // Optional second number for the courier.
+  @IsOptional()
+  @IsString()
+  alternatePhone?: string;
+
   @IsOptional()
   @IsEmail()
   email?: string;
@@ -124,6 +129,10 @@ export class UpdateAddressDto {
   @IsOptional()
   @IsString()
   phone?: string;
+
+  @IsOptional()
+  @IsString()
+  alternatePhone?: string;
 
   @IsOptional()
   @IsEmail()

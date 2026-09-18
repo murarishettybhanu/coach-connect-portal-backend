@@ -144,6 +144,7 @@ export class OrdersService {
       shippingAddress = {
         fullName: addr.fullName,
         phone: addr.phone,
+        ...(addr.alternatePhone ? { alternatePhone: addr.alternatePhone } : {}),
         ...(addr.email ? { email: addr.email } : {}),
       };
     } else {
@@ -222,6 +223,8 @@ export class OrdersService {
       state: incoming.state,
       pincode: incoming.pincode,
       phone: incoming.phone || e.phone,
+      // Kept when the incoming payload omits it — step 1 may have captured it.
+      alternatePhone: incoming.alternatePhone || e.alternatePhone,
       email: incoming.email || e.email,
     };
   }
@@ -253,6 +256,14 @@ export class OrdersService {
     if (!/^[6-9]\d{9}$/.test(String(address?.phone ?? ''))) {
       throw new BadRequestException(
         'Enter a valid 10-digit mobile number starting with 6-9',
+      );
+    }
+
+    // Optional, but if given it has to be a real number the courier can dial.
+    const alternate = String(address?.alternatePhone ?? '').trim();
+    if (alternate && !/^[6-9]\d{9}$/.test(alternate)) {
+      throw new BadRequestException(
+        'The alternate mobile number must be 10 digits starting with 6-9',
       );
     }
 
