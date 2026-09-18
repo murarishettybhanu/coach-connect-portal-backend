@@ -260,11 +260,6 @@ export class OrdersService {
     // yet; they're checked when the address is attached later.
     if (!address?.addressLine1) return;
 
-    if (String(address.addressLine2 ?? '').trim().length < 10) {
-      throw new BadRequestException(
-        'Area / Street needs at least 10 characters — include the locality',
-      );
-    }
     if (!String(address.landmark ?? '').trim()) {
       throw new BadRequestException('Landmark is required');
     }

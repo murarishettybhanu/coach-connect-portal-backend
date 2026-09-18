@@ -19,7 +19,7 @@ import {
 // The authentication template used to deliver codes. Configured by Meta id
 // because that's what the template screen shows and copies; the send API needs
 // a name, so the id is resolved once and cached.
-const DEFAULT_OTP_TEMPLATE_ID = '1655357342876479';
+const DEFAULT_OTP_TEMPLATE_ID = '1521285713364906';
 
 const CODE_TTL_MS = 10 * 60 * 1000;
 const RESEND_COOLDOWN_MS = 60 * 1000;

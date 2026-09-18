@@ -53,7 +53,7 @@ CORS is restricted to the frontend origins in `CORS_ORIGINS`. Also live in `main
 - `WHATSAPP_WABA_ID` — WhatsApp Business Account id; required for template endpoints only
 - `WHATSAPP_API_VERSION` — Graph version, defaults to `v21.0`
 - `WHATSAPP_OTP_TEMPLATE_ID` — Meta **template id** for the authentication template
-  that delivers verification codes (defaults to `1655357342876479`). Resolved to a
+  that delivers verification codes (defaults to `1521285713364906`). Resolved to a
   name/language once at runtime and cached, since the send API takes a name
 
 > Secrets live only in GitHub Actions secrets + the VM's gitignored `.env`. Never commit them.
@@ -233,8 +233,7 @@ costs a real WhatsApp message. Every failure mode returns the *same* message —
 telling a caller which part was wrong helps them enumerate numbers.
 
 Postal rules for the public forms live in `validatePublicAddress` (phone must be
-10 digits starting 6-9; Area/Street at least 10 characters; Landmark and
-Sector/Village required) and run server-side for untrusted callers, mirroring
+10 digits starting 6-9; Landmark and Sector/Village required) and run server-side for untrusted callers, mirroring
 the form. The forms also show a **label preview** before submitting —
 `AddressLabelPreview` mirrors `ShippingLabelOverlay`'s field order, so keep the
 two in step.
