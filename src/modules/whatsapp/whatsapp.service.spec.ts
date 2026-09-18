@@ -4,6 +4,9 @@ import { ForbiddenException } from '@nestjs/common';
 import { createHmac } from 'crypto';
 import { WhatsappService, WhatsappWebhookPayload } from './whatsapp.service';
 import { WhatsappMessage } from '../../schemas/whatsapp-message.schema';
+import { WhatsappConversation } from '../../schemas/whatsapp-conversation.schema';
+import { WhatsappSetting } from '../../schemas/whatsapp-setting.schema';
+import { WhatsappApiService } from './whatsapp-api.service';
 
 // [filter, update, options] as passed to Model.updateOne.
 type UpdateCall = [
@@ -50,19 +53,47 @@ const textPayload: WhatsappWebhookPayload = {
 describe('WhatsappService', () => {
   let service: WhatsappService;
   let updateOne: jest.Mock;
+  let conversationUpdateOne: jest.Mock;
+  let findOneAndUpdate: jest.Mock;
+  let sendText: jest.Mock;
+  let settings: Record<string, unknown>;
 
   beforeEach(async () => {
     process.env.WHATSAPP_APP_SECRET = APP_SECRET;
     process.env.WHATSAPP_VERIFY_TOKEN = VERIFY_TOKEN;
     updateOne = jest.fn().mockResolvedValue({ upsertedCount: 1 });
+    conversationUpdateOne = jest.fn().mockResolvedValue({});
+    // Returning a document means this caller won the acknowledgement claim.
+    findOneAndUpdate = jest.fn().mockResolvedValue({ contact: '919876543210' });
+    sendText = jest.fn().mockResolvedValue({ waMessageId: 'wamid.out1' });
+    settings = {
+      autoReplyEnabled: true,
+      acknowledgementText: 'Thanks for messaging Tribe Merchandise.',
+      afterHoursText: "We're away — back in the morning.",
+      businessHoursEnabled: false,
+      openTime: '09:00',
+      closeTime: '18:00',
+      openDays: [1, 2, 3, 4, 5, 6],
+      timezone: 'Asia/Kolkata',
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         WhatsappService,
         {
           provide: getModelToken(WhatsappMessage.name),
-          useValue: { updateOne },
+          useValue: { updateOne, create: jest.fn().mockResolvedValue({}) },
         },
+        {
+          provide: getModelToken(WhatsappConversation.name),
+          useValue: { updateOne: conversationUpdateOne, findOneAndUpdate },
+        },
+        {
+          provide: getModelToken(WhatsappSetting.name),
+          // getSettings() reads the singleton row; the tests mutate `settings`.
+          useValue: { findOne: jest.fn(() => Promise.resolve(settings)) },
+        },
+        { provide: WhatsappApiService, useValue: { sendText, canSend: true } },
       ],
     }).compile();
 
@@ -183,6 +214,56 @@ describe('WhatsappService', () => {
     it('ignores payloads for other objects', async () => {
       await service.handleEvent({ object: 'page', entry: [] });
       expect(updateOne).not.toHaveBeenCalled();
+    });
+
+    it('sends one acknowledgement when the claim is won', async () => {
+      await service.handleEvent(textPayload);
+
+      expect(sendText).toHaveBeenCalledTimes(1);
+      const [to, body] = sendText.mock.calls[0] as [string, string];
+      expect(to).toBe('919876543210');
+      expect(body).toBe(settings.acknowledgementText);
+    });
+
+    it('stays silent when the auto-reply is switched off', async () => {
+      settings.autoReplyEnabled = false;
+      await service.handleEvent(textPayload);
+      expect(sendText).not.toHaveBeenCalled();
+    });
+
+    it('uses the after-hours text when the business is closed', async () => {
+      // No open days at all, so every moment falls outside business hours.
+      settings.businessHoursEnabled = true;
+      settings.openDays = [];
+
+      await service.handleEvent(textPayload);
+
+      const [, body] = sendText.mock.calls[0] as [string, string];
+      expect(body).toBe(settings.afterHoursText);
+    });
+
+    it('stays silent when another delivery already claimed the acknowledgement', async () => {
+      // No document back = the conditional update matched nothing = already sent.
+      findOneAndUpdate.mockResolvedValueOnce(null);
+      await service.handleEvent(textPayload);
+      expect(sendText).not.toHaveBeenCalled();
+    });
+
+    it('does not acknowledge a redelivered message', async () => {
+      updateOne.mockResolvedValueOnce({ upsertedCount: 0 });
+      await service.handleEvent(textPayload);
+      expect(sendText).not.toHaveBeenCalled();
+    });
+
+    it('releases the claim when the acknowledgement fails to send', async () => {
+      sendText.mockRejectedValueOnce(new Error('graph down'));
+      await service.handleEvent(textPayload);
+
+      // Last conversation write clears ackSentAt so the next message retries.
+      const calls = conversationUpdateOne.mock.calls as Array<
+        [unknown, Record<string, unknown>]
+      >;
+      expect(calls[calls.length - 1][1]).toEqual({ $unset: { ackSentAt: 1 } });
     });
 
     it('swallows a storage failure so Meta still gets its 200', async () => {

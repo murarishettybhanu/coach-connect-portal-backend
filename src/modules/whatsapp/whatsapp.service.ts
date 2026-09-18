@@ -1,7 +1,9 @@
 import {
   Injectable,
   Logger,
+  BadRequestException,
   ForbiddenException,
+  NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -10,7 +12,17 @@ import { createHmac, timingSafeEqual } from 'crypto';
 import {
   WhatsappMessage,
   WhatsappDirection,
+  WhatsappSendStatus,
 } from '../../schemas/whatsapp-message.schema';
+import { WhatsappConversation } from '../../schemas/whatsapp-conversation.schema';
+import {
+  WhatsappSetting,
+  WHATSAPP_SETTINGS_KEY,
+} from '../../schemas/whatsapp-setting.schema';
+import {
+  WhatsappApiService,
+  type SendTemplateInput,
+} from './whatsapp-api.service';
 
 // Shape of the pieces of Meta's webhook payload we read. Everything is
 // optional because Meta adds fields (and whole `field` types) over time and a
@@ -68,6 +80,11 @@ interface WhatsappInboundMessage {
   [key: string]: unknown;
 }
 
+// WhatsApp's customer service window: free-form messages are only allowed
+// within 24 hours of the customer's last message. Outside it, Meta rejects
+// anything but an approved template.
+const WINDOW_MS = 24 * 60 * 60 * 1000;
+
 interface WhatsappMedia {
   id?: string;
   mime_type?: string;
@@ -104,7 +121,82 @@ export class WhatsappService {
   constructor(
     @InjectModel(WhatsappMessage.name)
     private readonly messageModel: Model<WhatsappMessage>,
+    @InjectModel(WhatsappConversation.name)
+    private readonly conversationModel: Model<WhatsappConversation>,
+    @InjectModel(WhatsappSetting.name)
+    private readonly settingModel: Model<WhatsappSetting>,
+    private readonly api: WhatsappApiService,
   ) {}
+
+  /**
+   * The singleton settings row, created with schema defaults on first read so
+   * the admin screen always has something to edit.
+   */
+  async getSettings(): Promise<WhatsappSetting> {
+    const existing = await this.settingModel.findOne({
+      key: WHATSAPP_SETTINGS_KEY,
+    });
+    if (existing) return existing;
+    return this.settingModel.create({ key: WHATSAPP_SETTINGS_KEY });
+  }
+
+  async updateSettings(
+    patch: Partial<WhatsappSetting>,
+  ): Promise<WhatsappSetting> {
+    await this.getSettings();
+    const updated = await this.settingModel.findOneAndUpdate(
+      { key: WHATSAPP_SETTINGS_KEY },
+      { $set: patch },
+      { new: true },
+    );
+    return updated as WhatsappSetting;
+  }
+
+  /**
+   * Whether it's currently inside the configured opening hours, evaluated in
+   * the configured timezone rather than the server's — the box runs UTC and
+   * the business runs on IST.
+   */
+  private isWithinBusinessHours(settings: WhatsappSetting): boolean {
+    if (!settings.businessHoursEnabled) return true;
+
+    try {
+      const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: settings.timezone || 'Asia/Kolkata',
+        hour: '2-digit',
+        minute: '2-digit',
+        weekday: 'short',
+        hour12: false,
+      }).formatToParts(new Date());
+
+      const value = (type: string) =>
+        parts.find((p) => p.type === type)?.value ?? '';
+      const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      const day = weekdays.indexOf(value('weekday'));
+      if (!settings.openDays?.includes(day)) return false;
+
+      const minutes = Number(value('hour')) * 60 + Number(value('minute'));
+      const [openH, openM] = (settings.openTime || '09:00')
+        .split(':')
+        .map(Number);
+      const [closeH, closeM] = (settings.closeTime || '18:00')
+        .split(':')
+        .map(Number);
+      const open = openH * 60 + openM;
+      const close = closeH * 60 + closeM;
+
+      // A close time earlier than the open time means the shift crosses midnight.
+      return close >= open
+        ? minutes >= open && minutes < close
+        : minutes >= open || minutes < close;
+    } catch (err) {
+      // A bad timezone string shouldn't silence the acknowledgement.
+      this.logger.warn(
+        `Business-hours check failed (${(err as Error).message}) — treating as open`,
+      );
+      return true;
+    }
+  }
 
   /**
    * Meta's subscription handshake. Returns the challenge to echo verbatim;
@@ -246,6 +338,168 @@ export class WhatsappService {
       .exec();
   }
 
+  /** Inbox list: every conversation, most recently active first. */
+  async listConversations(): Promise<
+    Array<Record<string, unknown> & { windowOpen: boolean }>
+  > {
+    const conversations = await this.conversationModel
+      .find()
+      .sort({ lastInboundAt: -1 })
+      .limit(200)
+      .lean()
+      .exec();
+
+    return conversations.map((c) => ({
+      ...c,
+      windowOpen: this.isWindowOpen(c.lastInboundAt),
+      windowExpiresAt: c.lastInboundAt
+        ? new Date(new Date(c.lastInboundAt).getTime() + WINDOW_MS)
+        : null,
+    }));
+  }
+
+  /** One thread, oldest first so it reads top-to-bottom like a chat. */
+  async getThread(contact: string, limit = 200): Promise<WhatsappMessage[]> {
+    return this.messageModel
+      .find({ contact })
+      .sort({ sentAt: 1 })
+      .limit(Math.min(Math.max(limit, 1), 500))
+      .exec();
+  }
+
+  /**
+   * Human reply from the admin inbox. Refuses up front when the 24-hour window
+   * has closed — Meta would reject it anyway, and a clear message here beats a
+   * Graph error code in the UI.
+   */
+  async replyTo(contact: string, body: string): Promise<WhatsappMessage> {
+    const conversation = await this.conversationModel.findOne({ contact });
+    if (!conversation) {
+      throw new NotFoundException('No WhatsApp conversation with that number');
+    }
+    if (!this.isWindowOpen(conversation.lastInboundAt)) {
+      throw new BadRequestException(
+        'The 24-hour reply window has closed for this customer. ' +
+          'Only an approved template message can be sent now.',
+      );
+    }
+    return this.sendText(contact, body);
+  }
+
+  /**
+   * Sends an approved template. Always allowed — this is how you reach someone
+   * after the 24-hour window has closed.
+   *
+   * The thread stores the *rendered* text rather than the template name, so the
+   * inbox reads like a conversation. The body is looked up from Meta since
+   * templates aren't mirrored locally; if that lookup fails the send still goes
+   * ahead and the row falls back to naming the template.
+   */
+  async sendTemplateTo(
+    contact: string,
+    input: SendTemplateInput,
+  ): Promise<WhatsappMessage> {
+    const now = new Date();
+    const rendered = await this.renderTemplate(input);
+
+    try {
+      const { waMessageId } = await this.api.sendTemplate(contact, input);
+
+      const [saved] = await Promise.all([
+        this.messageModel.create({
+          waMessageId,
+          direction: WhatsappDirection.OUTBOUND,
+          contact,
+          from: process.env.WHATSAPP_PHONE_NUMBER_ID ?? 'business',
+          to: contact,
+          type: 'template',
+          text: rendered,
+          templateName: input.name,
+          sentAt: now,
+          sendStatus: WhatsappSendStatus.SENT,
+          handled: true,
+        }),
+        this.conversationModel.updateOne(
+          { contact },
+          {
+            $set: {
+              lastOutboundAt: now,
+              lastMessagePreview: rendered.slice(0, 200),
+              lastMessageDirection: WhatsappDirection.OUTBOUND,
+            },
+            $setOnInsert: { contact },
+          },
+          { upsert: true },
+        ),
+      ]);
+      this.logger.log(`Sent template "${input.name}" to ${contact}`);
+      return saved;
+    } catch (err) {
+      await this.messageModel.create({
+        waMessageId: `failed-${now.getTime()}-${contact}`,
+        direction: WhatsappDirection.OUTBOUND,
+        contact,
+        from: process.env.WHATSAPP_PHONE_NUMBER_ID ?? 'business',
+        to: contact,
+        type: 'template',
+        text: rendered,
+        templateName: input.name,
+        sentAt: now,
+        sendStatus: WhatsappSendStatus.FAILED,
+        errorMessage: (err as Error).message,
+        handled: true,
+      });
+      throw err;
+    }
+  }
+
+  /** Fills a template's body with the given parameters, for the thread view. */
+  private async renderTemplate(input: SendTemplateInput): Promise<string> {
+    try {
+      const templates = await this.api.listTemplates();
+      const match = templates.find(
+        (t) => t.name === input.name && t.language === input.language,
+      );
+      const body = (match?.components ?? []).find(
+        (c) => (c as { type?: string }).type === 'BODY',
+      ) as { text?: string } | undefined;
+
+      if (!body?.text) return `[template: ${input.name}]`;
+      return body.text.replace(/\{\{(\d+)\}\}/g, (whole, index: string) => {
+        return input.parameters?.[Number(index) - 1] ?? whole;
+      });
+    } catch {
+      return `[template: ${input.name}]`;
+    }
+  }
+
+  /**
+   * Proxies inbound media. Meta's media URLs expire within minutes and require
+   * the access token, so the browser can't fetch them directly — the admin UI
+   * asks us and we stream the bytes back.
+   */
+  async getMedia(
+    mediaId: string,
+  ): Promise<{ buffer: Buffer; mimeType: string }> {
+    return this.api.downloadMedia(mediaId);
+  }
+
+  /** Clears the inbox unread badge — local only, not a WhatsApp read receipt. */
+  async markRead(
+    contact: string,
+  ): Promise<{ contact: string; unreadCount: 0 }> {
+    await this.conversationModel.updateOne(
+      { contact },
+      { $set: { unreadCount: 0 } },
+    );
+    return { contact, unreadCount: 0 };
+  }
+
+  private isWindowOpen(lastInboundAt?: Date | null): boolean {
+    if (!lastInboundAt) return false;
+    return Date.now() - new Date(lastInboundAt).getTime() < WINDOW_MS;
+  }
+
   /**
    * Idempotent insert keyed on the WhatsApp message id, so a redelivered batch
    * is a no-op rather than a duplicate row.
@@ -259,7 +513,7 @@ export class WhatsappService {
       return;
     }
 
-    const contact = (value.contacts ?? []).find(
+    const contactInfo = (value.contacts ?? []).find(
       (c) => c.wa_id === message.from,
     );
     const media = this.extractMedia(message);
@@ -267,8 +521,9 @@ export class WhatsappService {
     const doc = {
       waMessageId: message.id,
       direction: WhatsappDirection.INBOUND,
+      contact: message.from,
       from: message.from,
-      profileName: contact?.profile?.name,
+      profileName: contactInfo?.profile?.name,
       phoneNumberId: value.metadata?.phone_number_id,
       displayPhoneNumber: value.metadata?.display_phone_number,
       type: message.type ?? 'unknown',
@@ -289,15 +544,149 @@ export class WhatsappService {
       { upsert: true },
     );
 
-    if (result.upsertedCount) {
-      this.logger.log(
-        `Inbound WhatsApp ${doc.type} from ${doc.from}` +
-          (doc.text ? `: ${doc.text.slice(0, 120)}` : ''),
-      );
-      // Hook replies / lead creation in here — keep it non-blocking so the
-      // webhook still acks within Meta's timeout.
-    } else {
+    if (!result.upsertedCount) {
       this.logger.debug(`Duplicate delivery for ${message.id} ignored`);
+      return;
+    }
+
+    this.logger.log(
+      `Inbound WhatsApp ${doc.type} from ${doc.contact}` +
+        (doc.text ? `: ${doc.text.slice(0, 120)}` : ''),
+    );
+
+    await this.conversationModel.updateOne(
+      { contact: doc.contact },
+      {
+        $set: {
+          profileName: doc.profileName,
+          lastInboundAt: doc.sentAt,
+          lastMessagePreview: doc.text?.slice(0, 200) ?? `[${doc.type}]`,
+          lastMessageDirection: WhatsappDirection.INBOUND,
+        },
+        $inc: { unreadCount: 1 },
+        $setOnInsert: { contact: doc.contact },
+      },
+      { upsert: true },
+    );
+
+    await this.sendAcknowledgementIfFirst(doc.contact);
+  }
+
+  /**
+   * Sends the one-time acknowledgement, at most once per 24-hour customer
+   * service window — so a customer firing off five messages gets one reply,
+   * not five, while someone coming back next week is greeted again.
+   *
+   * The claim is a conditional update rather than a read-then-write: Meta can
+   * deliver several messages concurrently, and two handlers both reading
+   * "no ack yet" would each send one. Only the handler whose update matches
+   * wins. A failed send clears the claim so the next message retries.
+   */
+  private async sendAcknowledgementIfFirst(contact: string): Promise<void> {
+    if (!this.api.canSend) {
+      this.logger.warn(
+        'Outbound WhatsApp is not configured — skipping acknowledgement',
+      );
+      return;
+    }
+
+    const settings = await this.getSettings();
+    if (!settings.autoReplyEnabled) return;
+
+    const body = this.isWithinBusinessHours(settings)
+      ? settings.acknowledgementText
+      : settings.afterHoursText;
+    if (!body?.trim()) return;
+
+    const windowStart = new Date(Date.now() - WINDOW_MS);
+    const claimed = await this.conversationModel.findOneAndUpdate(
+      {
+        contact,
+        $or: [
+          { ackSentAt: { $exists: false } },
+          { ackSentAt: null },
+          { ackSentAt: { $lt: windowStart } },
+        ],
+      },
+      { $set: { ackSentAt: new Date() } },
+    );
+    if (!claimed) return;
+
+    try {
+      await this.sendText(contact, body, { automated: true });
+      this.logger.log(`Sent acknowledgement to ${contact}`);
+    } catch (err) {
+      // Release the claim so the customer's next message tries again.
+      await this.conversationModel.updateOne(
+        { contact },
+        { $unset: { ackSentAt: 1 } },
+      );
+      this.logger.error(
+        `Acknowledgement to ${contact} failed: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Sends a text message and records it as an OUTBOUND row so the admin inbox
+   * shows the full thread. A send that Meta rejects is still recorded, with the
+   * reason, rather than vanishing.
+   */
+  async sendText(
+    to: string,
+    body: string,
+    opts: { automated?: boolean } = {},
+  ): Promise<WhatsappMessage> {
+    const now = new Date();
+    try {
+      const { waMessageId } = await this.api.sendText(to, body);
+
+      const [saved] = await Promise.all([
+        this.messageModel.create({
+          waMessageId,
+          direction: WhatsappDirection.OUTBOUND,
+          contact: to,
+          from: process.env.WHATSAPP_PHONE_NUMBER_ID ?? 'business',
+          to,
+          type: 'text',
+          text: body,
+          sentAt: now,
+          sendStatus: WhatsappSendStatus.SENT,
+          automated: opts.automated ?? false,
+          handled: true,
+        }),
+        this.conversationModel.updateOne(
+          { contact: to },
+          {
+            $set: {
+              lastOutboundAt: now,
+              lastMessagePreview: body.slice(0, 200),
+              lastMessageDirection: WhatsappDirection.OUTBOUND,
+            },
+            $setOnInsert: { contact: to },
+          },
+          { upsert: true },
+        ),
+      ]);
+      return saved;
+    } catch (err) {
+      const reason = (err as Error).message;
+      await this.messageModel.create({
+        // No wamid exists for a send Meta refused, so key the row locally.
+        waMessageId: `failed-${now.getTime()}-${to}`,
+        direction: WhatsappDirection.OUTBOUND,
+        contact: to,
+        from: process.env.WHATSAPP_PHONE_NUMBER_ID ?? 'business',
+        to,
+        type: 'text',
+        text: body,
+        sentAt: now,
+        sendStatus: WhatsappSendStatus.FAILED,
+        errorMessage: reason,
+        automated: opts.automated ?? false,
+        handled: true,
+      });
+      throw err;
     }
   }
 

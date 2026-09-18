@@ -1,6 +1,11 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
 
+export enum WhatsappSendStatus {
+  SENT = 'SENT',
+  FAILED = 'FAILED',
+}
+
 export enum WhatsappDirection {
   INBOUND = 'INBOUND',
   OUTBOUND = 'OUTBOUND',
@@ -17,9 +22,19 @@ export class WhatsappMessage extends Document {
   @Prop({ enum: WhatsappDirection, default: WhatsappDirection.INBOUND })
   direction: WhatsappDirection;
 
-  // Sender's WhatsApp id — E.164 digits without '+', e.g. "919876543210".
+  // The customer's wa_id on both sides of the conversation — E.164 digits
+  // without '+', e.g. "919876543210". This is what groups a thread, since
+  // `from` flips to our own number on outbound messages.
   @Prop({ required: true, index: true })
+  contact: string;
+
+  // Sender: the customer's wa_id inbound, our business number outbound.
+  @Prop({ required: true })
   from: string;
+
+  // Recipient — set on outbound messages only.
+  @Prop()
+  to?: string;
 
   // WhatsApp profile name of the sender, when the contact block carries one.
   @Prop()
@@ -62,6 +77,23 @@ export class WhatsappMessage extends Document {
   // don't parse yet and for debugging against Meta's logs.
   @Prop({ type: Object })
   raw?: Record<string, unknown>;
+
+  // Outbound only: which approved template was used, when type is 'template'.
+  @Prop()
+  templateName?: string;
+
+  // Outbound only: whether the Graph API accepted the send.
+  @Prop({ enum: WhatsappSendStatus })
+  sendStatus?: WhatsappSendStatus;
+
+  // Outbound only: why a send failed, surfaced in the admin inbox.
+  @Prop()
+  errorMessage?: string;
+
+  // True for messages the system sent on its own (the acknowledgement), as
+  // opposed to a human reply typed in the admin inbox.
+  @Prop({ default: false })
+  automated: boolean;
 
   // Flipped once the message has been acted on (reply sent, lead created, …).
   @Prop({ default: false, index: true })

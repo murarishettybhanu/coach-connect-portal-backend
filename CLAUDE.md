@@ -45,7 +45,13 @@ CORS is restricted to the frontend origins in `CORS_ORIGINS`. Also live in `main
 - `WHATSAPP_VERIFY_TOKEN` — echoed handshake token; must match the Meta dashboard
 - `WHATSAPP_APP_SECRET` — Meta app secret; verifies `X-Hub-Signature-256`.
   **Required in production** — the webhook refuses unverified deliveries without it
-- `WHATSAPP_PHONE_NUMBER_ID` — optional; when set, events for other business numbers are ignored
+- `WHATSAPP_PHONE_NUMBER_ID` — the sending number; **required to send**, and when set
+  it also filters out webhook events for other business numbers
+- `WHATSAPP_ACCESS_TOKEN` — permanent System User token (`whatsapp_business_messaging`
+  + `whatsapp_business_management`); required to send. Without it inbound still works,
+  the acknowledgement is skipped with a warning
+- `WHATSAPP_WABA_ID` — WhatsApp Business Account id; required for template endpoints only
+- `WHATSAPP_API_VERSION` — Graph version, defaults to `v21.0`
 
 > Secrets live only in GitHub Actions secrets + the VM's gitignored `.env`. Never commit them.
 
@@ -101,7 +107,14 @@ src/
   (productId, quantity, baseCost, retailPrice, commission), `totalCommission`,
   `totalAmount`, `totalCost`, `shippingAddress` (India format: pincode, state,
   district, sector/village…), tracking/courier/payment refs.
-- **WhatsappMessage** — inbound WhatsApp message. Unique `waMessageId` (Meta redelivers
+- **WhatsappSetting** — singleton (`key: 'default'`) behind the admin settings page:
+  `autoReplyEnabled`, `acknowledgementText`, plus business hours
+  (`businessHoursEnabled`, `openTime`/`closeTime`, `openDays`, `timezone`,
+  `afterHoursText`). Created lazily with schema defaults on first read.
+- **WhatsappConversation** — one row per customer wa_id (`contact`, unique). Inbox
+  metadata: `profileName`, `lastInboundAt`/`lastOutboundAt`, `lastMessagePreview`,
+  `unreadCount`, and `ackSentAt` — the auto-acknowledgement guard.
+- **WhatsappMessage** — one WhatsApp message, inbound or outbound. Unique `waMessageId` (Meta redelivers
   until it gets a 200, so writes are upserts), `from` (wa_id), `profileName`, `type`,
   best-effort `text`, `mediaId`/`mimeType`, `contextMessageId` (reply-to), `sentAt`,
   full `raw` payload, `handled` flag.
@@ -155,15 +168,43 @@ the ledger, not read off `coach.walletBalance` — the schema field is not the s
   `POST /payout` (admin), `GET /` (admin)
 - **whatsapp**: `GET /whatsapp/webhook` (public — Meta's `hub.challenge` handshake,
   replies in `text/plain`), `POST /whatsapp/webhook` (public — signed inbound events,
-  always acks 200), `GET /whatsapp/messages?from=&limit=` (admin)
+  always acks 200). Admin-only: `GET /whatsapp/conversations`,
+  `GET /whatsapp/conversations/:contact`, `POST /whatsapp/conversations/:contact/reply`,
+  `PATCH /whatsapp/conversations/:contact/read`, `GET /whatsapp/messages?from=&limit=`,
+  `POST /whatsapp/conversations/:contact/template`, `GET /whatsapp/media/:mediaId`,
+  `GET|PATCH /whatsapp/settings`, `GET|POST /whatsapp/templates`,
+  `DELETE /whatsapp/templates/:name`
 
 ### WhatsApp webhook (`whatsapp.service.ts`)
 Callback URL given to Meta: `https://api.tribemerchandise.com/api/whatsapp/webhook`.
 `main.ts` boots with `rawBody: true` because the signature HMAC is over the exact
 bytes Meta sent — re-serialized JSON won't match. Delivery is at-least-once and
 sustained non-2xx gets the webhook disabled, so per-message failures are logged and
-swallowed, never returned. Outbound sending is not implemented yet; delivery statuses
-(sent/delivered/read) are logged only.
+swallowed, never returned. Delivery statuses (sent/delivered/read) are logged only.
+
+**Auto-acknowledgement.** A new inbound message triggers one acknowledgement per
+24-hour customer service window — the guard is a *conditional* update on
+`ackSentAt` (`findOneAndUpdate` matching "unset or older than 24h"), not a
+read-then-write, because Meta delivers concurrently and two handlers would each
+see "no ack yet" and both send. A failed send clears `ackSentAt` so the next
+message retries.
+
+Acknowledgement text and business hours come from **WhatsappSetting**, not code,
+so they change without a redeploy. Hours are evaluated in the configured
+timezone (`Intl.DateTimeFormat`) rather than the server's — the box runs UTC and
+the business runs on IST; a close time before the open time means an overnight
+shift. A bad timezone string is treated as "open" rather than silencing the reply.
+
+**Inbound media is proxied, never linked.** Meta's media URLs expire in minutes
+*and* need the bearer token, so `GET /whatsapp/media/:mediaId` resolves the id
+and streams the bytes; the admin UI fetches it as a blob because an `<img src>`
+can't carry the Authorization header.
+
+**The 24-hour window governs everything outbound.** Free-form text is only
+allowed within 24h of the customer's last message; outside it Meta accepts only
+approved templates. `replyTo` refuses early with an explanation rather than
+letting the Graph call fail. Templates are **not** stored locally — the endpoints
+proxy the Graph API so the review status shown is always current.
 
 ## Known issues / tech debt
 

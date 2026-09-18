@@ -76,6 +76,8 @@ jobs:
             WHATSAPP_VERIFY_TOKEN=${{ secrets.WHATSAPP_VERIFY_TOKEN }}
             WHATSAPP_APP_SECRET=${{ secrets.WHATSAPP_APP_SECRET }}
             WHATSAPP_PHONE_NUMBER_ID=${{ secrets.WHATSAPP_PHONE_NUMBER_ID }}
+            WHATSAPP_ACCESS_TOKEN=${{ secrets.WHATSAPP_ACCESS_TOKEN }}
+            WHATSAPP_WABA_ID=${{ secrets.WHATSAPP_WABA_ID }}
             EOF
             chmod 600 .env
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
