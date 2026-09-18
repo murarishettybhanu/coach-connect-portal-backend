@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ConflictException,
+  BadRequestException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
@@ -19,6 +24,14 @@ export class TribesService {
   ) {}
 
   async create(tribeData: any): Promise<any> {
+    // Required at onboarding: the owner's number is how fulfilment reaches them
+    // about orders and payouts. Enforced here too, not only in the admin form.
+    if (!/^[6-9]\d{9}$/.test(String(tribeData.phoneNumber ?? ''))) {
+      throw new BadRequestException(
+        'A 10-digit owner phone number starting with 6-9 is required',
+      );
+    }
+
     const existingUser = await this.usersService.findOneByEmail(tribeData.email);
     if (existingUser) {
       throw new ConflictException('A user with this email already exists');

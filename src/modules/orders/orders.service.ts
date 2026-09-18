@@ -28,6 +28,11 @@ const NOT_REJECTED = { approvalStatus: { $ne: ApprovalStatus.REJECTED } };
 const DISPATCH_TEMPLATE_ID = '2955234668146796';
 const DELIVERED_TEMPLATE_ID = '1419053503494614';
 
+// Both order templates were approved with an IMAGE header, so every send needs
+// one. The tribe's own logo when it has one, otherwise the platform mark served
+// by the frontend — a stable public URL Meta can fetch.
+const DEFAULT_ORDER_IMAGE_URL = 'https://tribemerchandise.com/tribe-logo.png';
+
 @Injectable()
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
@@ -830,13 +835,23 @@ export class OrdersService {
         order.items?.[0]?.productId?.name ||
         'order';
 
-      await this.whatsapp.sendTemplateByIdTo(phone, templateId, {
-        customer_name: order.shippingAddress?.fullName || 'there',
-        client_brand: coach.brand || coach.name || 'Tribe Merchandise',
-        kit_name: kitName,
-        // Meta rejects an empty parameter, so never send a blank tracking id.
-        tracking_id: order.trackingNumber || 'Shared soon',
-      });
+      const logo = typeof coach.logoUrl === 'string' ? coach.logoUrl.trim() : '';
+      const headerImageUrl = logo.startsWith('https://')
+        ? logo
+        : process.env.WHATSAPP_ORDER_IMAGE_URL || DEFAULT_ORDER_IMAGE_URL;
+
+      await this.whatsapp.sendTemplateByIdTo(
+        phone,
+        templateId,
+        {
+          customer_name: order.shippingAddress?.fullName || 'there',
+          client_brand: coach.brand || coach.name || 'Tribe Merchandise',
+          kit_name: kitName,
+          // Meta rejects an empty parameter, so never send a blank tracking id.
+          tracking_id: order.trackingNumber || 'Shared soon',
+        },
+        { headerImageUrl },
+      );
       this.logger.log(`Sent the ${status} WhatsApp update for order ${orderId}`);
     } catch (err) {
       this.logger.error(

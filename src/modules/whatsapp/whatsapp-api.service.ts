@@ -34,6 +34,13 @@ export interface SendTemplateInput {
    */
   namedParameters?: Record<string, string>;
   /**
+   * Image for a template whose HEADER is media. Such a template must carry a
+   * header component on EVERY send — the approved sample is not reused — and
+   * Meta rejects the whole message with 132012 if it's missing.
+   */
+  headerImageUrl?: string;
+
+  /**
    * Set for AUTHENTICATION templates. They need the passcode repeated in a
    * button component as well as the body — without it Meta rejects the send,
    * since the copy-code button has nothing to copy.
@@ -162,6 +169,14 @@ export class WhatsappApiService {
     input: SendTemplateInput,
   ): Promise<SendTextResult> {
     const components: Record<string, unknown>[] = [];
+
+    if (input.headerImageUrl) {
+      components.push({
+        type: 'header',
+        parameters: [{ type: 'image', image: { link: input.headerImageUrl } }],
+      });
+    }
+
     const named = input.namedParameters
       ? Object.entries(input.namedParameters)
       : [];

@@ -528,11 +528,24 @@ export class WhatsappService {
     contact: string,
     templateId: string,
     values: Record<string, string>,
+    opts: { headerImageUrl?: string } = {},
   ): Promise<WhatsappMessage> {
     const template = await this.api.getTemplateById(templateId);
     const body = (template.components ?? []).find(
       (c) => (c as { type?: string }).type === 'BODY',
     ) as { text?: string } | undefined;
+
+    // A media header is not optional: templates approved with one expect the
+    // image on every send, and Meta rejects the message outright without it.
+    const header = (template.components ?? []).find(
+      (c) => (c as { type?: string }).type === 'HEADER',
+    ) as { format?: string } | undefined;
+    const needsImage = header?.format === 'IMAGE';
+    if (needsImage && !opts.headerImageUrl) {
+      throw new BadRequestException(
+        `Template "${template.name}" has an image header, so a header image URL is required`,
+      );
+    }
 
     const placeholders = [
       ...(body?.text ?? '').matchAll(/\{\{\s*([\w]+)\s*\}\}/g),
@@ -540,16 +553,20 @@ export class WhatsappService {
 
     const numbered = placeholders.length > 0 && placeholders.every((p) => /^\d+$/.test(p));
 
+    const headerImageUrl = needsImage ? opts.headerImageUrl : undefined;
+
     const input: SendTemplateInput = numbered
       ? {
           name: template.name,
           language: template.language,
+          headerImageUrl,
           // Positional: fill in the order the placeholders appear.
           parameters: Object.values(values),
         }
       : {
           name: template.name,
           language: template.language,
+          headerImageUrl,
           // Named: only what this template actually asks for, so an extra value
           // (a tracking id on a template that doesn't show one) is not sent.
           namedParameters: Object.fromEntries(

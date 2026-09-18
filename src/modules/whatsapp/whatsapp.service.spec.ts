@@ -260,6 +260,67 @@ describe('WhatsappService', () => {
       ],
     };
 
+    // The real order templates: named params AND an approved image header.
+    const withImageHeader = {
+      ...{},
+      id: '2955234668146796',
+      name: 'order_dispach',
+      language: 'en',
+      category: 'UTILITY',
+      status: 'APPROVED',
+      components: [
+        { type: 'HEADER', format: 'IMAGE' },
+        { type: 'BODY', text: 'Hello {{customer_name}}, your {{kit_name}} shipped.' },
+      ],
+    };
+
+    it('sends the header image for a template approved with an image header', async () => {
+      getTemplateById.mockResolvedValueOnce(withImageHeader);
+      listTemplates.mockResolvedValueOnce([withImageHeader]);
+
+      await service.sendTemplateByIdTo(
+        '919876543210',
+        '2955234668146796',
+        { customer_name: 'Asha', kit_name: 'Welcome Kit' },
+        { headerImageUrl: 'https://example.com/logo.png' },
+      );
+
+      const [, input] = sendTemplate.mock.calls[0] as [
+        string,
+        { headerImageUrl?: string },
+      ];
+      expect(input.headerImageUrl).toBe('https://example.com/logo.png');
+    });
+
+    it('refuses rather than letting Meta reject a media template with no image', async () => {
+      getTemplateById.mockResolvedValueOnce(withImageHeader);
+
+      await expect(
+        service.sendTemplateByIdTo('919876543210', '2955234668146796', {
+          customer_name: 'Asha',
+        }),
+      ).rejects.toThrow(/image header/i);
+      expect(sendTemplate).not.toHaveBeenCalled();
+    });
+
+    it('sends no header image for a text-only template', async () => {
+      getTemplateById.mockResolvedValueOnce(namedTemplate);
+      listTemplates.mockResolvedValueOnce([namedTemplate]);
+
+      await service.sendTemplateByIdTo(
+        '919876543210',
+        '2955234668146796',
+        { customer_name: 'Asha' },
+        { headerImageUrl: 'https://example.com/logo.png' },
+      );
+
+      const [, input] = sendTemplate.mock.calls[0] as [
+        string,
+        { headerImageUrl?: string },
+      ];
+      expect(input.headerImageUrl).toBeUndefined();
+    });
+
     it('sends named parameters for a template written with named placeholders', async () => {
       getTemplateById.mockResolvedValueOnce(namedTemplate);
       listTemplates.mockResolvedValueOnce([namedTemplate]);
