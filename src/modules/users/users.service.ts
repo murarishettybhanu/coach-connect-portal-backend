@@ -24,10 +24,16 @@ export class UsersService {
     await this.userModel.findByIdAndUpdate(id, { password: hashedPassword }).exec();
   }
 
-  // Update a user's name and/or email (email is unique — reject collisions).
-  async update(id: string, data: { name?: string; email?: string }): Promise<void> {
+  // Update a user's name, email and/or phone (email is unique — reject collisions).
+  // The patch is built field by field, so anything new has to be named here.
+  async update(
+    id: string,
+    data: { name?: string; email?: string; phoneNumber?: string },
+  ): Promise<void> {
     const patch: any = {};
     if (data.name !== undefined) patch.name = data.name;
+    // An empty string is a deliberate "clear it", so only `undefined` is skipped.
+    if (data.phoneNumber !== undefined) patch.phoneNumber = data.phoneNumber;
     if (data.email !== undefined) {
       const existing = await this.userModel.findOne({ email: data.email } as any).exec();
       if (existing && String(existing._id) !== String(id)) {

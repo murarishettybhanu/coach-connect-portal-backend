@@ -30,6 +30,7 @@ export class TribesService {
     const user = await this.usersService.create({
       email: tribeData.email,
       name: tribeData.name,
+      phoneNumber: tribeData.phoneNumber || undefined,
       password: hashedPassword,
       role: UserRole.TRIBE,
     });
@@ -111,12 +112,14 @@ export class TribesService {
       throw new NotFoundException(`Tribe with ID ${id} not found`);
     }
 
-    // `email` lives on the linked User (login), not the Tribe. `name` is mirrored to
-    // both (User is the source of truth for display; Tribe.name kept in sync too).
-    const { email, ...tribeFields } = tribeData;
-    const userPatch: { name?: string; email?: string } = {};
+    // `email` and `phoneNumber` live on the linked User (login + contact), not
+    // the Tribe. `name` is mirrored to both (User is the source of truth for
+    // display; Tribe.name kept in sync too).
+    const { email, phoneNumber, ...tribeFields } = tribeData;
+    const userPatch: { name?: string; email?: string; phoneNumber?: string } = {};
     if (tribeFields.name !== undefined) userPatch.name = tribeFields.name;
     if (email !== undefined) userPatch.email = email;
+    if (phoneNumber !== undefined) userPatch.phoneNumber = phoneNumber;
     if (Object.keys(userPatch).length) {
       await this.usersService.update(String(tribe.userId), userPatch);
     }
