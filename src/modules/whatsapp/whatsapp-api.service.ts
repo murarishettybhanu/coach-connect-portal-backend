@@ -27,6 +27,12 @@ export interface SendTemplateInput {
   language: string;
   /** Values for the template's {{1}}, {{2}} … body placeholders, in order. */
   parameters?: string[];
+  /**
+   * Set for AUTHENTICATION templates. They need the passcode repeated in a
+   * button component as well as the body — without it Meta rejects the send,
+   * since the copy-code button has nothing to copy.
+   */
+  authentication?: boolean;
 }
 
 export interface MediaFile {
@@ -149,17 +155,26 @@ export class WhatsappApiService {
     to: string,
     input: SendTemplateInput,
   ): Promise<SendTextResult> {
-    const components = input.parameters?.length
-      ? [
-          {
-            type: 'body',
-            parameters: input.parameters.map((text) => ({
-              type: 'text',
-              text,
-            })),
-          },
-        ]
-      : undefined;
+    const components: Record<string, unknown>[] = [];
+
+    if (input.parameters?.length) {
+      components.push({
+        type: 'body',
+        parameters: input.parameters.map((text) => ({ type: 'text', text })),
+      });
+
+      // Authentication templates carry the same code twice: once in the body
+      // and once as the OTP button's payload. Meta spells the button's
+      // sub_type 'url' even for a copy-code button.
+      if (input.authentication) {
+        components.push({
+          type: 'button',
+          sub_type: 'url',
+          index: '0',
+          parameters: [{ type: 'text', text: input.parameters[0] }],
+        });
+      }
+    }
 
     const payload = {
       messaging_product: 'whatsapp',
@@ -169,7 +184,7 @@ export class WhatsappApiService {
       template: {
         name: input.name,
         language: { code: input.language },
-        ...(components ? { components } : {}),
+        ...(components.length ? { components } : {}),
       },
     };
 

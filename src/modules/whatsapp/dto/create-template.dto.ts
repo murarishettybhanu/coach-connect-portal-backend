@@ -1,8 +1,13 @@
 import { IsArray, IsIn, IsString, Matches } from 'class-validator';
 
-// Meta's template categories. AUTHENTICATION templates have their own fixed
-// shape, so the admin UI only offers the two a merchant normally writes.
-export const TEMPLATE_CATEGORIES = ['MARKETING', 'UTILITY'] as const;
+// Meta's three template categories. AUTHENTICATION has a fixed shape — Meta
+// writes and localises the copy itself — so the admin form builds its
+// components rather than taking free text.
+export const TEMPLATE_CATEGORIES = [
+  'MARKETING',
+  'UTILITY',
+  'AUTHENTICATION',
+] as const;
 
 export class CreateTemplateDto {
   // Meta requires lowercase letters, digits and underscores only.

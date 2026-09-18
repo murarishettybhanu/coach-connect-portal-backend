@@ -54,8 +54,11 @@ describe('WhatsappService', () => {
   let service: WhatsappService;
   let updateOne: jest.Mock;
   let conversationUpdateOne: jest.Mock;
+  let create: jest.Mock;
   let findOneAndUpdate: jest.Mock;
   let sendText: jest.Mock;
+  let sendTemplate: jest.Mock;
+  let listTemplates: jest.Mock;
   let settings: Record<string, unknown>;
 
   beforeEach(async () => {
@@ -63,9 +66,32 @@ describe('WhatsappService', () => {
     process.env.WHATSAPP_VERIFY_TOKEN = VERIFY_TOKEN;
     updateOne = jest.fn().mockResolvedValue({ upsertedCount: 1 });
     conversationUpdateOne = jest.fn().mockResolvedValue({});
+    create = jest.fn().mockResolvedValue({});
     // Returning a document means this caller won the acknowledgement claim.
     findOneAndUpdate = jest.fn().mockResolvedValue({ contact: '919876543210' });
     sendText = jest.fn().mockResolvedValue({ waMessageId: 'wamid.out1' });
+    sendTemplate = jest.fn().mockResolvedValue({ waMessageId: 'wamid.tpl1' });
+    listTemplates = jest.fn().mockResolvedValue([
+      {
+        id: '1',
+        name: 'order_dispatched',
+        language: 'en',
+        category: 'UTILITY',
+        status: 'APPROVED',
+        components: [
+          { type: 'BODY', text: 'Hi {{1}}, order {{2}} has shipped.' },
+        ],
+      },
+      {
+        id: '2',
+        name: 'login_code',
+        language: 'en',
+        category: 'AUTHENTICATION',
+        status: 'APPROVED',
+        // Meta generates authentication copy, so no body text comes back.
+        components: [{ type: 'BODY' }],
+      },
+    ]);
     settings = {
       autoReplyEnabled: true,
       acknowledgementText: 'Thanks for messaging Tribe Merchandise.',
@@ -82,7 +108,7 @@ describe('WhatsappService', () => {
         WhatsappService,
         {
           provide: getModelToken(WhatsappMessage.name),
-          useValue: { updateOne, create: jest.fn().mockResolvedValue({}) },
+          useValue: { updateOne, create },
         },
         {
           provide: getModelToken(WhatsappConversation.name),
@@ -93,7 +119,10 @@ describe('WhatsappService', () => {
           // getSettings() reads the singleton row; the tests mutate `settings`.
           useValue: { findOne: jest.fn(() => Promise.resolve(settings)) },
         },
-        { provide: WhatsappApiService, useValue: { sendText, canSend: true } },
+        {
+          provide: WhatsappApiService,
+          useValue: { sendText, sendTemplate, listTemplates, canSend: true },
+        },
       ],
     }).compile();
 
@@ -152,6 +181,58 @@ describe('WhatsappService', () => {
       expect(() => service.assertValidSignature(body, undefined)).toThrow(
         ForbiddenException,
       );
+    });
+  });
+
+  describe('sendTemplateTo', () => {
+    it('records the rendered body so the thread reads like a conversation', async () => {
+      await service.sendTemplateTo('9876543210', {
+        name: 'order_dispatched',
+        language: 'en',
+        parameters: ['Asha', 'TM-10482'],
+      });
+
+      const [, input] = sendTemplate.mock.calls[0] as [
+        string,
+        { authentication?: boolean },
+      ];
+      expect(input.authentication).toBe(false);
+
+      const created = (create.mock.calls[0] as [Record<string, unknown>])[0];
+      expect(created.text).toBe('Hi Asha, order TM-10482 has shipped.');
+      // The typed-in number reaches Meta as a wa_id.
+      expect(created.contact).toBe('919876543210');
+    });
+
+    it('flags an authentication template so the code also rides in the OTP button', async () => {
+      await service.sendTemplateTo('919876543210', {
+        name: 'login_code',
+        language: 'en',
+        parameters: ['123456'],
+      });
+
+      const [, input] = sendTemplate.mock.calls[0] as [
+        string,
+        { authentication?: boolean },
+      ];
+      expect(input.authentication).toBe(true);
+
+      // No body text from Meta, so the thread falls back to the standard wording.
+      const created = (create.mock.calls[0] as [Record<string, unknown>])[0];
+      expect(created.text).toBe('123456 is your verification code.');
+    });
+
+    it('still sends when the template lookup fails', async () => {
+      listTemplates.mockRejectedValueOnce(new Error('graph down'));
+
+      await service.sendTemplateTo('919876543210', {
+        name: 'order_dispatched',
+        language: 'en',
+      });
+
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+      const created = (create.mock.calls[0] as [Record<string, unknown>])[0];
+      expect(created.text).toBe('[template: order_dispatched]');
     });
   });
 

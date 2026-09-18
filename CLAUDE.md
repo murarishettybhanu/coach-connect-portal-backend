@@ -195,6 +195,14 @@ timezone (`Intl.DateTimeFormat`) rather than the server's — the box runs UTC a
 the business runs on IST; a close time before the open time means an overnight
 shift. A bad timezone string is treated as "open" rather than silencing the reply.
 
+**Authentication templates are a different shape at both ends.** Meta writes and
+localises their copy, so `createTemplate` sends knobs (`add_security_recommendation`,
+`code_expiration_minutes`, an `OTP`/`COPY_CODE` button) rather than text — and the
+send repeats the passcode in a `button` component (`sub_type: 'url'`, index `'0'`)
+as well as the body, or Meta rejects it because the copy-code button has nothing
+to copy. `sendTemplateTo` looks the template up to decide; a lookup failure still
+sends, treated as an ordinary template.
+
 `POST /whatsapp/conversations/:contact/template` doubles as "start a new
 conversation": a template is the only message WhatsApp lets you *open* with, so
 the `:contact` there may be a number that has never written in. It runs through
