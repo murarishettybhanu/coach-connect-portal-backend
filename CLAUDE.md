@@ -42,6 +42,10 @@ CORS is restricted to the frontend origins in `CORS_ORIGINS`. Also live in `main
 - `CORS_ORIGINS` — comma-separated allowed frontend origins
 - `SITE_ADDRESS` — Caddy apex/www domains for the static frontend (see Deployment)
 - `MAIL_*` (SES SMTP), `S3_*` (uploads to S3), `PORT` (default 3000)
+- `WHATSAPP_VERIFY_TOKEN` — echoed handshake token; must match the Meta dashboard
+- `WHATSAPP_APP_SECRET` — Meta app secret; verifies `X-Hub-Signature-256`.
+  **Required in production** — the webhook refuses unverified deliveries without it
+- `WHATSAPP_PHONE_NUMBER_ID` — optional; when set, events for other business numbers are ignored
 
 > Secrets live only in GitHub Actions secrets + the VM's gitignored `.env`. Never commit them.
 
@@ -77,6 +81,7 @@ src/
     campaigns/   # Welcome-kit & store-sale campaigns (public slug links)
     orders/      # Order lifecycle, approvals, commission calc  ← most business logic
     transactions/# Wallet ledger, balance, payouts
+    whatsapp/    # Public WhatsApp Cloud API webhook (inbound messages)
 ```
 
 ## Data model (`src/schemas/`)
@@ -96,6 +101,10 @@ src/
   (productId, quantity, baseCost, retailPrice, commission), `totalCommission`,
   `totalAmount`, `totalCost`, `shippingAddress` (India format: pincode, state,
   district, sector/village…), tracking/courier/payment refs.
+- **WhatsappMessage** — inbound WhatsApp message. Unique `waMessageId` (Meta redelivers
+  until it gets a 200, so writes are upserts), `from` (wa_id), `profileName`, `type`,
+  best-effort `text`, `mediaId`/`mimeType`, `contextMessageId` (reply-to), `sentAt`,
+  full `raw` payload, `handled` flag.
 - **Transaction** — wallet ledger per Coach. `type` (`COMMISSION | PAYOUT | DEBIT`),
   `amount`, optional `orderId`, `utrReference` (payouts), `status`.
 
@@ -107,7 +116,10 @@ src/
 - `RolesGuard` allows the request if `req.user.role` matches any required role.
   No required roles → open endpoint.
 - Public (no guard): `POST /api/auth/*`, `GET /api/campaigns/slug/:slug`,
-  `GET /api/coaches/:username`, `POST /api/orders` (storefront checkout).
+  `GET /api/coaches/:username`, `POST /api/orders` (storefront checkout),
+  `GET|POST /api/whatsapp/webhook` (Meta calls it with no auth header — authenticity
+  is the `X-Hub-Signature-256` HMAC instead; both are `@SkipThrottle()` so a burst of
+  customer messages isn't 429'd into Meta's retry/disable path).
 
 ## Key business logic — Orders (`orders.service.ts`)
 
@@ -141,6 +153,17 @@ the ledger, not read off `coach.walletBalance` — the schema field is not the s
   `PATCH /:id/approve` & `PATCH /:id/reject` (admin/coach)
 - **transactions**: `GET /me` & `GET /my-balance` & `GET /coach` & `GET /balance` (coach),
   `POST /payout` (admin), `GET /` (admin)
+- **whatsapp**: `GET /whatsapp/webhook` (public — Meta's `hub.challenge` handshake,
+  replies in `text/plain`), `POST /whatsapp/webhook` (public — signed inbound events,
+  always acks 200), `GET /whatsapp/messages?from=&limit=` (admin)
+
+### WhatsApp webhook (`whatsapp.service.ts`)
+Callback URL given to Meta: `https://api.tribemerchandise.com/api/whatsapp/webhook`.
+`main.ts` boots with `rawBody: true` because the signature HMAC is over the exact
+bytes Meta sent — re-serialized JSON won't match. Delivery is at-least-once and
+sustained non-2xx gets the webhook disabled, so per-message failures are logged and
+swallowed, never returned. Outbound sending is not implemented yet; delivery statuses
+(sent/delivered/read) are logged only.
 
 ## Known issues / tech debt
 

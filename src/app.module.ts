@@ -17,6 +17,7 @@ import { UploadsModule } from './modules/uploads/uploads.module';
 import { CatalogModule } from './modules/catalog/catalog.module';
 import { TribeKitsModule } from './modules/tribe-kits/tribe-kits.module';
 import { BarcodesModule } from './modules/barcodes/barcodes.module';
+import { WhatsappModule } from './modules/whatsapp/whatsapp.module';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { BarcodesModule } from './modules/barcodes/barcodes.module';
     CatalogModule,
     TribeKitsModule,
     BarcodesModule,
+    WhatsappModule,
   ],
   controllers: [AppController],
   providers: [

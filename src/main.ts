@@ -6,7 +6,10 @@ import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // `rawBody` keeps the untouched request bytes around (as `req.rawBody`) so the
+  // WhatsApp webhook can verify Meta's X-Hub-Signature-256 HMAC, which is
+  // computed over the exact payload — re-serialized JSON would not match.
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   const isProd = process.env.NODE_ENV === 'production';
 
   // Trust the single reverse proxy (Caddy) so req.ip reflects the real client
