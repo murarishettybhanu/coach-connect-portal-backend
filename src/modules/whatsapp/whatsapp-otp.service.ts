@@ -68,6 +68,17 @@ export class WhatsappOtpService {
   async request(rawPhone: string): Promise<OtpRequestResult> {
     const contact = this.whatsapp.normalizeContact(rawPhone);
 
+    // Check the shape *before* spending a message. normalizeContact is
+    // deliberately permissive (it serves the admin inbox, which messages
+    // customers abroad), but every number reaching this endpoint comes from an
+    // Indian claim form, where a mobile is 10 digits starting 6-9. Without
+    // this, a typo'd or made-up number still costs a real WhatsApp send.
+    if (!/^91[6-9]\d{9}$/.test(contact)) {
+      throw new BadRequestException(
+        'Enter a valid 10-digit Indian mobile number starting with 6-9',
+      );
+    }
+
     if (!this.api.canSend) {
       throw new ServiceUnavailableException(
         'WhatsApp sending is not configured — cannot verify numbers right now',

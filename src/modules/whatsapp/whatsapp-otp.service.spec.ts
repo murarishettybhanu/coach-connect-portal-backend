@@ -77,6 +77,15 @@ describe('WhatsappOtpService', () => {
       expect(await bcrypt.compare(code, update.$set.codeHash)).toBe(true);
     });
 
+    it('refuses a number that cannot be an Indian mobile, before spending a message', async () => {
+      // Starts with 5 — a typo or a made-up number. Meta would still accept
+      // the send and bill for it, so this has to be caught here.
+      await expect(service.request('5876543210')).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(sendTemplateTo).not.toHaveBeenCalled();
+    });
+
     it('refuses a resend inside the cooldown', async () => {
       findOne.mockResolvedValueOnce({
         contact: '919876543210',
