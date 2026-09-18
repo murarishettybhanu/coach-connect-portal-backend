@@ -25,7 +25,7 @@ const NOT_REJECTED = { approvalStatus: { $ne: ApprovalStatus.REJECTED } };
 
 // Approved WhatsApp templates that tell a customer where their parcel is.
 // Overridable by env so a re-approved template can be swapped without a deploy.
-const DISPATCH_TEMPLATE_ID = '2955234668146796';
+const DISPATCH_TEMPLATE_ID = '1057815553754091';
 const DELIVERED_TEMPLATE_ID = '1419053503494614';
 
 // Both order templates were approved with an IMAGE header, so every send needs
