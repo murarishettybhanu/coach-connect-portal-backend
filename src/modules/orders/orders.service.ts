@@ -457,6 +457,216 @@ export class OrdersService {
     return order.save();
   }
 
+  /**
+   * Admin: rejected claims, paginated and searchable.
+   *
+   * Order listings exclude rejected claims (see NOT_REJECTED) so the pipeline
+   * only holds work that still matters — this is the one place they surface,
+   * for looking one up or checking a decision.
+   */
+  async findRejected(
+    options: {
+      coachId?: string;
+      page?: number;
+      limit?: number;
+      search?: string;
+    } = {},
+  ): Promise<{
+    data: Order[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  }> {
+    const page = Math.max(1, Number(options.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(options.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const filter: any = {
+      approvalStatus: ApprovalStatus.REJECTED,
+      isDeleted: { $ne: true },
+    };
+    if (options.coachId) filter.coachId = options.coachId;
+
+    const search = options.search?.trim();
+    if (search) {
+      // Escape regex special chars so user input is treated literally.
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      filter.$or = [
+        { 'shippingAddress.fullName': regex },
+        { 'shippingAddress.phone': regex },
+        { 'shippingAddress.city': regex },
+        { 'shippingAddress.state': regex },
+      ];
+    }
+
+    const [data, total] = await Promise.all([
+      this.orderModel
+        .find(filter)
+        .sort({ updatedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('items.productId')
+        .populate('coachId')
+        .populate('campaignId', 'name type')
+        .exec(),
+      this.orderModel.countDocuments(filter).exec(),
+    ]);
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) || 1 };
+  }
+
+  /**
+   * Logs a parcel that came back, found by the tracking number on it — which is
+   * what an admin has in hand (typed, or scanned off the label).
+   *
+   * Stock goes back on the shelf: the goods are physically returned. Commission
+   * is deliberately left alone — reversing a tribe's earnings is a money
+   * decision, not a side effect of scanning a barcode.
+   */
+  async markReturned(
+    trackingNumber: string,
+    note?: string,
+  ): Promise<Order> {
+    const code = (trackingNumber || '').trim();
+    if (!code) throw new BadRequestException('Enter or scan a tracking number');
+
+    const order = await this.orderModel
+      .findOne({ trackingNumber: code, isDeleted: { $ne: true } } as any)
+      .populate('items.productId')
+      .exec();
+    if (!order) {
+      throw new NotFoundException(`No order found with tracking number ${code}`);
+    }
+    if (order.status === OrderStatus.RETURNED) {
+      throw new BadRequestException('That parcel is already logged as returned');
+    }
+    // A parcel can only come back if it went out.
+    if (
+      order.status !== OrderStatus.DISPATCHED &&
+      order.status !== OrderStatus.DELIVERED
+    ) {
+      throw new BadRequestException(
+        `This order is ${order.status.toLowerCase()} — only a dispatched or delivered parcel can be returned`,
+      );
+    }
+
+    for (const item of order.items) {
+      const pid = (item.productId as any)?._id || item.productId;
+      if (pid) await this.productsService.incrementStock(String(pid), item.quantity);
+    }
+
+    const now = new Date();
+    order.status = OrderStatus.RETURNED;
+    order.returnedAt = now;
+    if (note) order.returnNote = note;
+    if (!order.statusHistory) order.statusHistory = [] as any;
+    order.statusHistory.push({ status: OrderStatus.RETURNED, at: now, note });
+    return order.save();
+  }
+
+  /** Admin: returned parcels, paginated and searchable (tracking number included). */
+  async findReturned(
+    options: { coachId?: string; page?: number; limit?: number; search?: string } = {},
+  ): Promise<{
+    data: Order[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  }> {
+    const page = Math.max(1, Number(options.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(options.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const filter: any = {
+      status: OrderStatus.RETURNED,
+      isDeleted: { $ne: true },
+    };
+    if (options.coachId) filter.coachId = options.coachId;
+
+    const search = options.search?.trim();
+    if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      filter.$or = [
+        { 'shippingAddress.fullName': regex },
+        { 'shippingAddress.phone': regex },
+        { 'shippingAddress.city': regex },
+        { trackingNumber: regex },
+      ];
+    }
+
+    const [data, total] = await Promise.all([
+      this.orderModel
+        .find(filter)
+        .sort({ returnedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('items.productId')
+        .populate('coachId')
+        .populate('campaignId', 'name type')
+        .exec(),
+      this.orderModel.countDocuments(filter).exec(),
+    ]);
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) || 1 };
+  }
+
+  /**
+   * Sends a returned parcel out again: a fresh NEW order carrying the same items
+   * and (possibly corrected) address, linked to the original in both directions.
+   *
+   * A new order rather than a status rewind, because the first attempt really
+   * happened — it consumed a barcode and a postage charge, and the history of
+   * both should survive. For the same reason the original keeps the address it
+   * was actually sent to: a corrected address applies to the replacement only.
+   */
+  async reorderReturned(id: string, address?: any): Promise<Order> {
+    const original = await this.orderModel.findById(id).exec();
+    if (!original) throw new NotFoundException(`Order with ID ${id} not found`);
+    if (original.status !== OrderStatus.RETURNED) {
+      throw new BadRequestException('Only a returned order can be sent again');
+    }
+    if (original.reorderedTo) {
+      throw new BadRequestException('This return has already been sent again');
+    }
+
+    // Stock was returned when the parcel came back; the replacement consumes it.
+    for (const item of original.items) {
+      const pid = (item.productId as any)?._id || item.productId;
+      if (pid) await this.productsService.decrementStock(String(pid), item.quantity);
+    }
+
+    const now = new Date();
+    const replacement = new this.orderModel({
+      coachId: original.coachId,
+      campaignId: original.campaignId,
+      type: original.type,
+      status: OrderStatus.NEW,
+      // Already approved once — a re-send shouldn't queue for approval again.
+      approvalStatus: original.approvalStatus,
+      items: original.items,
+      totalAmount: original.totalAmount,
+      totalCost: original.totalCost,
+      // No second commission: the ledger entry from the first order still stands.
+      totalCommission: 0,
+      // Corrected fields win; anything omitted falls back to the original.
+      shippingAddress: address
+        ? this.mergeAddress(original.shippingAddress, address)
+        : original.shippingAddress,
+      deliveryType: original.deliveryType,
+      reorderedFrom: original._id,
+      statusHistory: [{ status: OrderStatus.NEW, at: now, note: 'Re-sent after return' }],
+    });
+    const saved = await replacement.save();
+
+    original.reorderedTo = saved._id as any;
+    await original.save();
+    return saved;
+  }
+
   // Admin: list soft-deleted orders (optionally scoped to a tribe).
   async findDeleted(coachId?: string): Promise<Order[]> {
     const filter: any = { isDeleted: true };
@@ -465,6 +675,7 @@ export class OrdersService {
       .find(filter)
       .sort({ deletedAt: -1 })
       .populate('items.productId')
+      .populate('coachId')
       .populate('campaignId', 'name type packageWeight length breadth height')
       .exec();
   }

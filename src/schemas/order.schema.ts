@@ -7,6 +7,8 @@ export enum OrderStatus {
   PACKED = 'PACKED',
   DISPATCHED = 'DISPATCHED',
   DELIVERED = 'DELIVERED',
+  // Parcel came back — undelivered, refused, or returned by the customer.
+  RETURNED = 'RETURNED',
   CANCELLED = 'CANCELLED',
 }
 
@@ -94,6 +96,21 @@ export class Order extends Document {
     alternatePhone?: string;
     email?: string;
   };
+
+  // When the parcel was logged as returned, and why.
+  @Prop()
+  returnedAt?: Date;
+
+  @Prop()
+  returnNote?: string;
+
+  // Set on a replacement order created from a returned one, and on the original
+  // pointing at its replacement — so a re-send is traceable both ways.
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Order' })
+  reorderedFrom?: MongooseSchema.Types.ObjectId;
+
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Order' })
+  reorderedTo?: MongooseSchema.Types.ObjectId;
 
   // When the customer ticked the delivery-details agreement on the public form.
   // Kept as a timestamp, not a flag, so a dispute has a date attached.

@@ -26,6 +26,8 @@ import { Throttle } from '@nestjs/throttler';
 import { OrderStatus } from '../../schemas/order.schema';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { AttachAddressDto, UpdateAddressDto } from './dto/attach-address.dto';
+import { MarkReturnedDto } from './dto/mark-returned.dto';
+import { ReorderDto } from './dto/reorder.dto';
 
 @Controller('orders')
 export class OrdersController {
@@ -115,6 +117,58 @@ export class OrdersController {
   @Roles(UserRole.ADMIN)
   findDeleted(@Query('coachId') coachId?: string) {
     return this.ordersService.findDeleted(coachId);
+  }
+
+  // Admin: log a parcel that came back, by the tracking number on the label.
+  @Post('returned')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  markReturned(@Body() dto: MarkReturnedDto) {
+    return this.ordersService.markReturned(dto.trackingNumber, dto.note);
+  }
+
+  // Admin: returned parcels — paginated + searchable.
+  @Get('returned')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  findReturned(
+    @Query('coachId') coachId?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.ordersService.findReturned({
+      coachId,
+      page: Number(page) || 1,
+      limit: Number(limit) || 20,
+      search,
+    });
+  }
+
+  // Admin: send a returned parcel out again as a fresh order.
+  @Post(':id/reorder')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  reorder(@Param('id') id: string, @Body() dto: ReorderDto) {
+    return this.ordersService.reorderReturned(id, dto?.address);
+  }
+
+  // Admin: rejected claims — paginated + searchable (they're hidden everywhere else).
+  @Get('rejected')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  findRejected(
+    @Query('coachId') coachId?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.ordersService.findRejected({
+      coachId,
+      page: Number(page) || 1,
+      limit: Number(limit) || 20,
+      search,
+    });
   }
 
   // Tribe/Admin: list a campaign's address-pending claims (bulk upload + count).
