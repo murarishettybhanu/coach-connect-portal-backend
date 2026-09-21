@@ -32,6 +32,13 @@ export class Product extends Document {
   @Prop({ enum: ['TEXT', 'PHOTO', 'SIZE'] })
   customizationType?: string;
 
+  // The size choices offered to the customer when customizationType is 'SIZE'.
+  // Empty falls back to the standard XS–XXL run, so existing products keep
+  // behaving as they did; set it for anything sized differently (waist inches,
+  // shoe sizes, "Free size").
+  @Prop({ type: [String], default: undefined })
+  sizeOptions?: string[];
+
   @Prop({ default: true })
   isActive: boolean;
 

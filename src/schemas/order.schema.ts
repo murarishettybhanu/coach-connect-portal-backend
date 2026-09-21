@@ -159,6 +159,8 @@ export class Order extends Document {
       status: { type: String, required: true },
       at: { type: Date, required: true },
       note: { type: String },
+      // Who made the change, for entries an admin caused by hand.
+      by: { type: MongooseSchema.Types.ObjectId, ref: 'User' },
     }],
     default: [],
   })
@@ -166,6 +168,7 @@ export class Order extends Document {
     status: string;
     at: Date;
     note?: string;
+    by?: MongooseSchema.Types.ObjectId;
   }[];
 }
 

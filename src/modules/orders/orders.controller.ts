@@ -204,12 +204,14 @@ export class OrdersController {
     @Query('limit') limit?: string,
     @Query('search') search?: string,
     @Query('status') status?: string,
+    @Query('coachId') coachId?: string,
   ) {
     return this.ordersService.findAllPaginated({
       page: page ? Number(page) : undefined,
       limit: limit ? Number(limit) : undefined,
       search,
       status,
+      coachId,
     });
   }
 
@@ -330,6 +332,15 @@ export class OrdersController {
   async remove(@Param('id') id: string) {
     await this.ordersService.deleteOrder(id);
     return { success: true };
+  }
+
+  // Admin: move an order back one stage (Delivered → Dispatched → Ready to Ship).
+  @Patch(':id/revert-status')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  revertStatus(@Param('id') id: string, @Request() req) {
+    const userId = req.user?.userId || req.user?.sub || req.user?._id;
+    return this.ordersService.revertStatus(id, userId ? String(userId) : undefined);
   }
 
   // Admin: restore a soft-deleted order.

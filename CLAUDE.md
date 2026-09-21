@@ -99,7 +99,9 @@ src/
 - **Coach** — 1:1 with a User (`userId`). `username` (storefront URL slug), `brand`,
   `bio`, `tagline`, `socialLinks`, `walletBalance`, `storefrontConfig`
   (banner/theme/domain), `bankingDetails` (account/IFSC). `isActive`.
-- **Product** — owned by a Coach. `name`, `baseProductionCost`, `retailPrice`,
+- **Product** — owned by a Coach. `customizationType` (`TEXT | PHOTO | SIZE`) with
+  `sizeOptions` for the sizes a customer chooses from (empty = the standard XS–XXL).
+  Stock is per product, not per size — see Future scope. `name`, `baseProductionCost`, `retailPrice`,
   `sku` (unique), `stockLevel`, `imageUrl`, `isActive`.
 - **Campaign** — owned by a Coach. `type` (`WELCOME_KIT | STORE_SALE`),
   `products[]` (productId + optional `retailPrice` for store sales), unique `slug`
@@ -244,6 +246,55 @@ require it and check it matches the phone on the submission, so the gate can't b
 skipped by calling the API directly. Signed-in callers are exempt — `isSignedIn`
 in `orders.controller.ts` — which keeps the admin CSV importer working. Storefront
 checkout carries no `campaignId` and is unaffected.
+
+## Future scope
+
+### Per-size inventory (planned, not built)
+
+A product with `customizationType: 'SIZE'` carries `sizeOptions` (the choices a
+customer picks from), but stock is still a single `Product.stockLevel` for the
+whole product — sell 40 tees and nothing knows how many mediums are left.
+
+Chosen approach when we pick this up — **per-size quantities on the product**,
+not a product per size (which would multiply the catalogue and lose the size
+dropdown) and not a full `ProductVariant` collection (right at 10× the
+catalogue, but it touches orders, kits, campaigns, CSV and labels):
+
+```ts
+sizeStock: [{ size: 'M', qty: 12 }, { size: '32.5', qty: 4 }]
+```
+
+An **array of subdocuments, not a map** — Mongo keys can't contain dots, so
+`{ '32.5': 4 }` breaks on the first half-size. The array also allows the atomic
+guard that keeps the total honest by construction:
+
+```js
+updateOne(
+  { _id, sizeStock: { $elemMatch: { size, qty: { $gte: q } } } },
+  { $inc: { 'sizeStock.$.qty': -q, stockLevel: -q } },
+)
+```
+
+One operation moves the size *and* the cached total, so `stockLevel` stays a
+correct sum and every existing report keeps working.
+
+Work, roughly 3 days: atomic helpers + tests · thread `item.customizationValue`
+through **all seven** order stock paths (create + rollback, delete, restore,
+reject, return, reorder) · per-size admin adjustments with `size` on
+`InventoryLog` · disable sold-out sizes in the claim/checkout dropdowns ·
+migration + a reconciliation script.
+
+Decide before starting:
+1. **Migration has no breakdown** — 40 in stock doesn't say 10 of each. Needs a
+   one-time admin screen to distribute; don't assume an even split.
+2. **Kits** containing a sized product have no size picker in the claim flow.
+   Per-size stock makes that gap load-bearing.
+3. The **CSV order importer** has a Size column and creates orders directly — it
+   must respect per-size stock or it becomes the drift vector.
+4. **Removing a size** that still holds stock or open orders: block, or keep the
+   bucket until it empties.
+5. **Legacy orders** carry a size but were never counted per-size — reconcile
+   from `sizeStock`, never by replaying order history.
 
 ## Known issues / tech debt
 

@@ -875,9 +875,16 @@ export class OrdersService {
     };
   }
 
-  // Same as findByCoachPaginated but across ALL coaches (admin Orders page).
+  // Same as findByCoachPaginated but across ALL coaches (admin Orders page),
+  // or one of them when `coachId` narrows it.
   async findAllPaginated(
-    options: { page?: number; limit?: number; search?: string; status?: string } = {},
+    options: {
+      page?: number;
+      limit?: number;
+      search?: string;
+      status?: string;
+      coachId?: string;
+    } = {},
   ): Promise<{
     data: Order[];
     total: number;
@@ -890,6 +897,7 @@ export class OrdersService {
     const skip = (page - 1) * limit;
 
     const filter: any = { ...NOT_REJECTED, isDeleted: { $ne: true } };
+    if (options.coachId) filter.coachId = options.coachId;
     if (options.status) {
       filter.status = options.status;
       // "New" excludes welcome-kit orders still awaiting approval — those live in
@@ -1076,6 +1084,72 @@ export class OrdersService {
         `Could not send the ${status} WhatsApp update for order ${orderId}: ${(err as Error).message}`,
       );
     }
+  }
+
+  /**
+   * Moves an order back one stage on the board, for a status clicked by
+   * mistake. Only before anything ships:
+   *
+   *   Ready to Ship → New
+   *   New → Approval Pending  (welcome kits that went through approval)
+   *
+   * A dispatched or delivered parcel is physically gone, so there is nothing to
+   * take back — those are corrected by logging a return, not by rewinding.
+   *
+   * Deliberately NOT routed through updateStatus: that fires the customer's
+   * WhatsApp notification, and undoing a misclick must not message anyone.
+   */
+  async revertStatus(id: string, performedBy?: string): Promise<Order> {
+    const order = await this.orderModel.findById(id).exec();
+    if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
+
+    const now = new Date();
+
+    // New → back into the approval queue. Only welcome kits reach New by being
+    // approved; a store sale has nothing before it.
+    if (
+      order.status === OrderStatus.NEW &&
+      order.approvalStatus === ApprovalStatus.APPROVED
+    ) {
+      order.approvalStatus = ApprovalStatus.PENDING;
+      order.approvedAt = undefined as any;
+      order.approvedBy = undefined as any;
+      // Approval created the commission entry; un-approving must remove it or
+      // re-approving pays the tribe twice.
+      await this.transactionsService.deleteByOrder(id);
+
+      if (!order.statusHistory) order.statusHistory = [] as any;
+      order.statusHistory.push({
+        status: 'PENDING_APPROVAL',
+        at: now,
+        note: 'Reverted from New — returned to approval',
+        by: performedBy as any,
+      } as any);
+      this.logger.log(`Order ${id} reverted from New to Approval Pending`);
+      return order.save();
+    }
+
+    // Ready to Ship → New. The barcode stays attached: it may already be on a
+    // printed label, and re-packing reuses the same one rather than burning a
+    // second from the pool.
+    if (order.status === OrderStatus.PACKED) {
+      order.status = OrderStatus.NEW;
+      if (!order.statusHistory) order.statusHistory = [] as any;
+      order.statusHistory.push({
+        status: OrderStatus.NEW,
+        at: now,
+        note: 'Reverted from Ready to Ship',
+        by: performedBy as any,
+      } as any);
+      this.logger.log(`Order ${id} reverted from Ready to Ship to New`);
+      return order.save();
+    }
+
+    throw new BadRequestException(
+      order.status === OrderStatus.DISPATCHED || order.status === OrderStatus.DELIVERED
+        ? 'This parcel has already shipped — log a return instead of moving it back'
+        : `A ${order.status.toLowerCase()} order has no earlier stage to move back to`,
+    );
   }
 
   // Admin: change an order's delivery type before it is dispatched. A NEW order has
