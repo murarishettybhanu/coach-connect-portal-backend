@@ -539,7 +539,7 @@ export class WhatsappService {
     // image on every send, and Meta rejects the message outright without it.
     const header = (template.components ?? []).find(
       (c) => (c as { type?: string }).type === 'HEADER',
-    ) as { format?: string } | undefined;
+    ) as { format?: string; text?: string } | undefined;
     const needsImage = header?.format === 'IMAGE';
     if (needsImage && !opts.headerImageUrl) {
       throw new BadRequestException(
@@ -551,15 +551,34 @@ export class WhatsappService {
       ...(body?.text ?? '').matchAll(/\{\{\s*([\w]+)\s*\}\}/g),
     ].map((m) => m[1]);
 
-    const numbered = placeholders.length > 0 && placeholders.every((p) => /^\d+$/.test(p));
+    const numbered =
+      placeholders.length > 0 && placeholders.every((p) => /^\d+$/.test(p));
 
     const headerImageUrl = needsImage ? opts.headerImageUrl : undefined;
+
+    // A TEXT header can carry its own placeholder ("Dispatch Update {{date}}").
+    // Body parameters don't fill it, so pull its values out of the same map.
+    const headerPlaceholders =
+      header?.format === 'TEXT'
+        ? [...(header.text ?? '').matchAll(/\{\{\s*([\w]+)\s*\}\}/g)].map(
+            (m) => m[1],
+          )
+        : [];
+    const headerNamed = Object.fromEntries(
+      headerPlaceholders
+        .filter((key) => !/^\d+$/.test(key) && values[key] !== undefined)
+        .map((key) => [key, values[key]]),
+    );
+    const headerNamedParameters = Object.keys(headerNamed).length
+      ? headerNamed
+      : undefined;
 
     const input: SendTemplateInput = numbered
       ? {
           name: template.name,
           language: template.language,
           headerImageUrl,
+          headerNamedParameters,
           // Positional: fill in the order the placeholders appear.
           parameters: Object.values(values),
         }
@@ -567,6 +586,7 @@ export class WhatsappService {
           name: template.name,
           language: template.language,
           headerImageUrl,
+          headerNamedParameters,
           // Named: only what this template actually asks for, so an extra value
           // (a tracking id on a template that doesn't show one) is not sent.
           namedParameters: Object.fromEntries(
@@ -596,7 +616,8 @@ export class WhatsappService {
     }
 
     return body.text.replace(/\{\{\s*([\w]+)\s*\}\}/g, (whole, key: string) => {
-      if (/^\d+$/.test(key)) return input.parameters?.[Number(key) - 1] ?? whole;
+      if (/^\d+$/.test(key))
+        return input.parameters?.[Number(key) - 1] ?? whole;
       return input.namedParameters?.[key] ?? whole;
     });
   }

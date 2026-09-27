@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { MongooseModule } from '@nestjs/mongoose';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
@@ -24,6 +25,8 @@ import { WhatsappModule } from './modules/whatsapp/whatsapp.module';
     ConfigModule.forRoot({
       isGlobal: true,
     }),
+    // Drives the nightly dispatch digest (see DispatchDigestService).
+    ScheduleModule.forRoot(),
     // Global per-IP rate limiting (baseline anti-abuse / brute-force protection).
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
     MongooseModule.forRootAsync({
@@ -48,9 +51,6 @@ import { WhatsappModule } from './modules/whatsapp/whatsapp.module';
     WhatsappModule,
   ],
   controllers: [AppController],
-  providers: [
-    AppService,
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
-  ],
+  providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
 export class AppModule {}

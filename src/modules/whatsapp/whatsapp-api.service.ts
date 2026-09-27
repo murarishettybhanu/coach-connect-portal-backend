@@ -41,6 +41,13 @@ export interface SendTemplateInput {
   headerImageUrl?: string;
 
   /**
+   * Values for a TEXT header carrying its own named placeholder, e.g. a header
+   * reading "Dispatch Update {{date}}". Ignored when `headerImageUrl` is set,
+   * since a header is either media or text, never both.
+   */
+  headerNamedParameters?: Record<string, string>;
+
+  /**
    * Set for AUTHENTICATION templates. They need the passcode repeated in a
    * button component as well as the body — without it Meta rejects the send,
    * since the copy-code button has nothing to copy.
@@ -174,6 +181,15 @@ export class WhatsappApiService {
       components.push({
         type: 'header',
         parameters: [{ type: 'image', image: { link: input.headerImageUrl } }],
+      });
+    } else if (input.headerNamedParameters) {
+      // A TEXT header with its own placeholder ({{date}}) needs a header
+      // component of its own; body parameters don't fill it.
+      components.push({
+        type: 'header',
+        parameters: Object.entries(input.headerNamedParameters).map(
+          ([parameter_name, text]) => ({ type: 'text', parameter_name, text }),
+        ),
       });
     }
 

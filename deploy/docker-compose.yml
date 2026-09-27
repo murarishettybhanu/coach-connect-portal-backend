@@ -30,6 +30,12 @@ services:
       WHATSAPP_OTP_TEMPLATE_ID: ${WHATSAPP_OTP_TEMPLATE_ID:-1521285713364906}
       WHATSAPP_DISPATCH_TEMPLATE_ID: ${WHATSAPP_DISPATCH_TEMPLATE_ID:-1057815553754091}
       WHATSAPP_DELIVERED_TEMPLATE_ID: ${WHATSAPP_DELIVERED_TEMPLATE_ID:-1419053503494614}
+      # Nightly 9pm IST dispatch digest to tribe owners. Sending is OFF unless
+      # one of these is set: TEST_NUMBER routes every digest to a single number,
+      # ENABLED=true sends to the real owners. Neither = compute and log only.
+      WHATSAPP_DIGEST_TEST_NUMBER: ${WHATSAPP_DIGEST_TEST_NUMBER:-}
+      WHATSAPP_DIGEST_ENABLED: ${WHATSAPP_DIGEST_ENABLED:-}
+      WHATSAPP_DIGEST_TEMPLATE_ID: ${WHATSAPP_DIGEST_TEMPLATE_ID:-1393420296257983}
       # India Post external-integration API (consignment tracking). Defaults to
       # the UAT host; switch to the production host once India Post issues
       # production credentials and whitelists this VM's IP.

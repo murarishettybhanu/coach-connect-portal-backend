@@ -3,6 +3,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { OrdersService } from './orders.service';
+import { DispatchDigestService } from './dispatch-digest.service';
 import { OrdersController } from './orders.controller';
 import { Order, OrderSchema } from '../../schemas/order.schema';
 import { Campaign, CampaignSchema } from '../../schemas/campaign.schema';
@@ -31,8 +32,8 @@ import { WhatsappModule } from '../whatsapp/whatsapp.module';
       inject: [ConfigService],
     }),
   ],
-  providers: [OrdersService],
+  providers: [OrdersService, DispatchDigestService],
   controllers: [OrdersController],
-  exports: [OrdersService],
+  exports: [OrdersService, DispatchDigestService],
 })
 export class OrdersModule {}

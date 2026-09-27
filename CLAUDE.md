@@ -55,6 +55,8 @@ CORS is restricted to the frontend origins in `CORS_ORIGINS`. Also live in `main
 - `WHATSAPP_OTP_TEMPLATE_ID` — Meta **template id** for the authentication template
   that delivers verification codes (defaults to `1521285713364906`). Resolved to a
   name/language once at runtime and cached, since the send API takes a name
+- `WHATSAPP_DIGEST_TEST_NUMBER` / `WHATSAPP_DIGEST_ENABLED` / `WHATSAPP_DIGEST_TEMPLATE_ID`
+  — the nightly dispatch digest (below). Sending is **off unless one is set**
 - `INDIAPOST_BASE_URL` — India Post external-integration host. Defaults to UAT
   (`https://test.cept.gov.in/beextcustomer`); point at production once India Post
   issues production credentials
@@ -310,6 +312,37 @@ require it and check it matches the phone on the submission, so the gate can't b
 skipped by calling the API directly. Signed-in callers are exempt — `isSignedIn`
 in `orders.controller.ts` — which keeps the admin CSV importer working. Storefront
 checkout carries no `campaignId` and is unaffected.
+
+## Nightly dispatch digest (`orders/dispatch-digest.service.ts`)
+
+A 9pm IST WhatsApp summary to each tribe owner (template
+`order_dispach_update_for_tribe_owner`, id `1393420296257983`), covering the 24
+hours since the previous 9pm.
+
+Things worth knowing before touching it:
+- **The window is not a UTC day.** IST is UTC+05:30 with no DST, so the cut-off
+  is 15:30 UTC. Computing it with the server's own clock and zeroing the minutes
+  lands on 20:30 or 21:30 IST — never 21:00. `windowEndingAt` does the arithmetic
+  with a constant offset; its tests pin the half hour.
+- **`statusHistory` is the only record of when a dispatch happened** — the
+  order's own timestamps move on to delivery — so the query matches a
+  `DISPATCHED` history entry inside the window.
+- **A shipment is an order, not a unit.** An order of three tees is one shipment;
+  an order holding two products counts once against each, so the product lines
+  can legitimately sum to more than the total.
+- **Template parameters cannot contain newlines** (Meta rejects them), which is
+  why `dispatch_summary` joins the product lines inline — and why the template's
+  own example shows them run together.
+- The template's TEXT header carries its own `{{date}}` placeholder. Body
+  parameters don't fill a header, so `sendTemplateByIdTo` now splits values
+  between header and body components.
+- **Tribes with nothing dispatched are skipped.** Most nights only one to three
+  of the eleven ship anything; a nightly "0 shipments" to the rest is how a
+  business number gets muted.
+
+Sending is off unless configured: `WHATSAPP_DIGEST_TEST_NUMBER` routes every
+digest to one number (rollout step 1), `WHATSAPP_DIGEST_ENABLED=true` sends to
+real owners, neither set computes and logs only.
 
 ## Future scope
 
