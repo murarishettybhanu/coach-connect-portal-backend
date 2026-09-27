@@ -130,15 +130,14 @@ export class WeeklyReportService {
 
   /**
    * The values offered to the template. `sendTemplateByIdTo` sends only the
-   * placeholders the template actually declares, so listing a name the template
-   * doesn't use costs nothing.
+   * placeholders the template actually declares, so a name the template doesn't
+   * use costs nothing.
    *
-   * The summary is offered under two names on purpose. The template was
-   * approved with `{{weekly_product_summary}}`, which is 22 characters — and
-   * Meta refuses any `parameter_name` over 20 at send time, so as approved it
-   * cannot send at all. Once the variable is renamed to `product_summary` in
-   * WhatsApp Manager this starts working with no deploy; until then it keeps
-   * failing loudly rather than silently sending something wrong.
+   * Every name here must stay within Meta's 20-character `parameter_name`
+   * limit. The template was originally approved with `weekly_product_summary`
+   * (22), which Meta accepted at creation and then refused on every send; it
+   * was renamed to `product_summary` in WhatsApp Manager. `sendTemplate`
+   * now rejects an over-long name before it reaches Meta.
    */
   templateValues(
     report: TribeWeeklyReport,
@@ -152,7 +151,6 @@ export class WeeklyReportService {
       week_start_date: this.formatDate(start),
       week_end_date: this.formatDate(end),
       product_summary: summary,
-      weekly_product_summary: summary,
       total_delivered: String(report.totalDelivered),
       total_returned: String(report.totalReturned),
     };

@@ -93,17 +93,16 @@ describe('WeeklyReportService.templateValues', () => {
   );
 
   it('keeps every parameter_name within Meta’s 20-character limit', () => {
-    // The approved template's own `weekly_product_summary` is 22 and is
-    // rejected at send time; it is offered only until the rename lands.
-    const sendable = Object.keys(values).filter(
-      (k) => k !== 'weekly_product_summary',
-    );
-    for (const key of sendable) expect(key.length).toBeLessThanOrEqual(20);
+    // Meta accepts an over-long name at template creation and then refuses
+    // every send with it, so this is the only place it gets caught early.
+    for (const key of Object.keys(values)) {
+      expect(key.length).toBeLessThanOrEqual(20);
+    }
   });
 
-  it('offers the summary under both the old and the renamed key', () => {
-    expect(values.product_summary).toBe(values.weekly_product_summary);
+  it('sends the summary under the renamed key only', () => {
     expect(values.product_summary).toContain('Diamond Kit');
+    expect(values.weekly_product_summary).toBeUndefined();
   });
 
   it('formats the week dates as the template expects', () => {

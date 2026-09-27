@@ -81,6 +81,14 @@ interface GraphError {
 const GRAPH_TIMEOUT_MS = 10_000;
 
 /**
+ * Meta's cap on a named template parameter. It is enforced on SEND, not on
+ * template creation — a template approved with a longer name looks healthy in
+ * WhatsApp Manager and then fails every send with a 400. Checking here turns
+ * that into an error naming the offending parameter, at the call site.
+ */
+const MAX_PARAMETER_NAME = 20;
+
+/**
  * Thin client for the Meta Graph API — everything we send *to* WhatsApp.
  *
  * Kept separate from `WhatsappService` (which owns the inbound webhook and
@@ -175,6 +183,7 @@ export class WhatsappApiService {
     to: string,
     input: SendTemplateInput,
   ): Promise<SendTextResult> {
+    this.assertParameterNames(input);
     const components: Record<string, unknown>[] = [];
 
     if (input.headerImageUrl) {
@@ -338,6 +347,27 @@ export class WhatsappApiService {
    * envelope into a Nest exception. Meta puts the useful sentence in
    * `error_user_msg`, falling back to `message`.
    */
+
+  /**
+   * Fails a send whose named parameters Meta would reject, before spending the
+   * round trip — and with a message that says which name and how long it is,
+   * rather than Meta's context-free "must be at most 20 characters long".
+   */
+  private assertParameterNames(input: SendTemplateInput): void {
+    const names = [
+      ...Object.keys(input.namedParameters ?? {}),
+      ...Object.keys(input.headerNamedParameters ?? {}),
+    ];
+    const tooLong = names.filter((n) => n.length > MAX_PARAMETER_NAME);
+    if (tooLong.length) {
+      const detail = tooLong.map((n) => `"${n}" (${n.length})`).join(', ');
+      throw new BadRequestException(
+        `Template "${input.name}" has parameter names over ${MAX_PARAMETER_NAME} characters: ${detail}. ` +
+          'Rename the variable in WhatsApp Manager — Meta accepts these at template creation but rejects every send.',
+      );
+    }
+  }
+
   private async request<T>(
     path: string,
     init: { method: string; body?: unknown },
