@@ -108,20 +108,35 @@ src/
 concurrent logins, and retries once on a 401 in case a token lapsed in flight).
 `TrackingService` maps `POST /v1/tracking/bulk` onto our own `TrackingResult`.
 
-Three things that shape the mapping:
-- India Post returns scans **newest-first**; we sort them oldest-first so
-  `events[0]` is the booking and the last entry is the current state.
+**The live API is looser than their integration document — trust this list, not
+the document's samples.** Verified against UAT from the production host:
+- A scan's `date` carries the day with the **clock zeroed** (`2026-02-19T00:00:00Z`)
+  and the real time is in a separate `time` field (`17:44:15`). They must be
+  stitched back together, or every scan renders as 00:00 and same-day events have
+  nothing to order by.
+- An article India Post has no data for is **echoed back with its number and every
+  other field blank**, not omitted. So a `booking_details` object proves nothing —
+  "known" means real booking data (`booked_on`/`booked_at`/`article_type`/
+  `delivery_location`) or at least one scan.
+- `tariff` is `0` for "not supplied" (don't print ₹0), `officeid` is a **number**,
+  `booked_on` can be **null**, and `remarks`/`rts` are **absent from every scan**
+  despite being documented — so the return-to-sender flag is currently always false.
+- Scan order is **not guaranteed**: the document's samples are newest-first, the
+  live API answers oldest-first. We sort rather than trust it.
 - `del_status` is the string `"not delivered"` for undelivered articles — it
   contains the word "delivered", so a plain `/deliver/` test reads backwards.
-- Articles India Post doesn't know are **omitted from the response** rather than
-  returned as an error, so callers match on `booking_details.article_number`.
 
-Two operational constraints, both from India Post's integration document:
-1. It only reports articles **booked under the same customer id** as the
-   credentials — parcels booked outside this integration come back "not found".
-2. Production access requires our **static IP to be whitelisted**. (The UAT host
-   resets the TLS handshake from unapproved networks, so it can't be smoke-tested
-   from a dev machine.)
+Operational notes:
+1. Their document says only articles **booked under our own customer id** are
+   reported. Against UAT that restriction did not appear to bite (arbitrary real
+   article numbers returned data), so treat it as unconfirmed. It matters because
+   we book by handing over a CSV, not through their Booking API.
+2. India Post **filters callers by IP**: the UAT host resets the TLS handshake
+   from unapproved networks, so it cannot be smoke-tested from a dev machine. The
+   EC2 reaches it fine, so verify from there (`docker compose exec backend node -e …`).
+3. Production currently points at **UAT** (`INDIAPOST_BASE_URL`) with the sandbox
+   credentials from the document — deliberate, pending India Post onboarding.
+   Tokens come back with `expires_in: 900`.
 
 ## Data model (`src/schemas/`)
 
