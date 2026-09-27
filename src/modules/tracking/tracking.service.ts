@@ -1,9 +1,9 @@
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import {
-  Injectable,
-  Logger,
-  BadRequestException,
-  BadGatewayException,
-} from '@nestjs/common';
+  IndiaPostApiService,
+  IndiaPostArticle,
+  IndiaPostTrackingEvent,
+} from './india-post-api.service';
 
 export interface TrackingEvent {
   timestamp: string; // ISO
@@ -12,15 +12,17 @@ export interface TrackingEvent {
   office: string;
   pincode: string;
   remarks: string;
+  /** India Post flagged this scan as "returned to sender". */
+  rts: boolean;
 }
 
 export interface TrackingResult {
   consignmentNumber: string;
-  /** true when a scrape succeeded and we have a page to read */
+  /** true when the upstream call succeeded and we have an answer to read */
   available: boolean;
-  /** true when we have a status (timeline or cached) for this article */
+  /** true when India Post knows this article */
   found: boolean;
-  /** true when only the cached summary is available (no live event timeline) */
+  /** true when the booking is known but no scans have been recorded yet */
   partial: boolean;
   message?: string;
   currentStatus: string;
@@ -32,244 +34,181 @@ export interface TrackingResult {
   events: TrackingEvent[];
   articleType?: string;
   deliveryLocation?: string;
+  /** Office the article was booked at. */
+  bookedAtOffice?: string;
+  originPincode?: string;
+  destinationPincode?: string;
+  /** What India Post charged for the article, in INR. */
+  tariff?: number;
+  /** True once any scan is flagged return-to-sender. */
+  returnToSender: boolean;
   source: string;
   fetchedAt: string;
 }
 
+// India Post format: 2 letters + 9 digits + 2 letters, e.g. EN409716859IN
+const ARTICLE_NUMBER_RE = /^[A-Z]{2}\d{9}[A-Z]{2}$/;
+const SOURCE = 'India Post';
+
 /**
- * Scrapes India Post consignment status from myspeedpost.com.
+ * Consignment status from India Post's official Bulk Tracking API
+ * (`POST /v1/tracking/bulk`), mapped onto our own shape.
  *
- * The site server-renders the tracking payload as JSON in the initial HTML, so
- * a single GET with a browser User-Agent + JSON extraction returns it — no
- * Livewire replay needed.
- *
- * Two shapes exist in that HTML:
- *  1. `tracking_events` — the full live event timeline (present when India Post
- *     upstream is reachable).
- *  2. A cached summary "cards" array (inside an Alpine `this.chunk([...])` call)
- *     that carries the LAST-KNOWN status (current_status, delivered_at, …) even
- *     when a live re-sync fails and the timeline is dropped.
- *
- * Note: the page ALWAYS contains a hidden "India Post Servers are down" banner
- * template, so its mere presence is NOT a reliable down signal — we never rely
- * on it. We prefer the timeline, fall back to the cached cards, and only report
- * "no info" when neither is present.
+ * India Post returns only articles booked under the same customer id as the
+ * configured credentials, so an article we booked outside this integration
+ * comes back as "not found" rather than as an error. See
+ * `IndiaPostApiService` for the credentials and host configuration.
  */
 @Injectable()
 export class TrackingService {
   private readonly logger = new Logger(TrackingService.name);
-  private readonly BASE = 'https://myspeedpost.com/';
-  private readonly UA =
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+
+  constructor(private readonly indiaPost: IndiaPostApiService) {}
 
   async track(consignmentNumber: string): Promise<TrackingResult> {
+    const number = this.normalize(consignmentNumber);
+    const [result] = await this.trackMany([number]);
+    return result;
+  }
+
+  /**
+   * Tracking for several articles in one upstream round trip — the shape the
+   * India Post API is actually built for (up to 500 per call).
+   */
+  async trackMany(consignmentNumbers: string[]): Promise<TrackingResult[]> {
+    const numbers = consignmentNumbers.map((n) => this.normalize(n));
+    if (!numbers.length) return [];
+
+    const articles = await this.indiaPost.trackBulk(numbers);
+
+    // Index the response by article number; India Post omits what it doesn't know.
+    const byNumber = new Map<string, IndiaPostArticle>();
+    for (const article of articles) {
+      const key = (article.booking_details?.article_number || '')
+        .trim()
+        .toUpperCase();
+      if (key) byNumber.set(key, article);
+    }
+
+    return numbers.map((number) => this.map(number, byNumber.get(number)));
+  }
+
+  private normalize(consignmentNumber: string): string {
     const number = (consignmentNumber || '').trim().toUpperCase();
-    // India Post format: 2 letters + 9 digits + 2 letters, e.g. EN409716859IN
-    if (!/^[A-Z]{2}\d{9}[A-Z]{2}$/.test(number)) {
+    if (!ARTICLE_NUMBER_RE.test(number)) {
       throw new BadRequestException(
         'Invalid consignment number. Expected 13 characters like EN409716859IN.',
       );
     }
-    const html = await this.fetchPage(number);
-    return this.parse(number, html);
+    return number;
   }
 
-  private async fetchPage(number: string): Promise<string> {
-    const url = `${this.BASE}?n=${encodeURIComponent(number)}`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
-    try {
-      const res = await fetch(url, {
-        signal: controller.signal,
-        headers: {
-          'User-Agent': this.UA,
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9',
-          'Accept-Language': 'en-US,en;q=0.9',
-          Referer: this.BASE,
-        },
-      });
-      const body = await res.text();
-      if (
-        res.status === 403 ||
-        /just a moment|cf-browser-verification|attention required/i.test(body)
-      ) {
-        throw new BadGatewayException(
-          'Tracking source blocked the request (bot protection). Try again later.',
-        );
-      }
-      if (!res.ok) {
-        throw new BadGatewayException(
-          `Tracking source returned HTTP ${res.status}.`,
-        );
-      }
-      return body;
-    } catch (e: any) {
-      if (e?.name === 'AbortError') {
-        throw new BadGatewayException('Tracking request timed out.');
-      }
-      if (e instanceof BadGatewayException) throw e;
-      throw new BadGatewayException('Could not reach the tracking source.');
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  private parse(number: string, rawHtml: string): TrackingResult {
-    const html = this.decodeEntities(rawHtml);
+  private map(number: string, article?: IndiaPostArticle): TrackingResult {
     const now = new Date().toISOString();
+    const base = {
+      consignmentNumber: number,
+      available: true,
+      source: SOURCE,
+      fetchedAt: now,
+    };
 
-    // 1) Preferred: the full live event timeline.
-    const eventsJson = this.extractJsonAfter('"tracking_events":', html);
-    if (eventsJson) {
-      let raw: any[] = [];
-      try {
-        raw = JSON.parse(eventsJson);
-      } catch {
-        raw = [];
-      }
-      if (raw.length) {
-        const events: TrackingEvent[] = raw.map((e) => ({
-          timestamp: e.tracked_at,
-          event: e.event,
-          eventType: e.event_type,
-          office: e.office,
-          pincode: String(e.pincode ?? ''),
-          remarks: e.remarks || '',
-        }));
-        const first = events[0];
-        const last = events[events.length - 1];
-        const deliveredEvent = [...events]
-          .reverse()
-          .find(
-            (e) => /deliver/i.test(e.eventType) || /delivered/i.test(e.event),
-          );
-        return {
-          consignmentNumber: number,
-          available: true,
-          found: true,
-          partial: false,
-          currentStatus: last?.event ?? 'Unknown',
-          currentStatusType: last?.eventType ?? 'Unknown',
-          delivered: !!deliveredEvent,
-          bookedAt: first?.timestamp ?? null,
-          deliveredAt: deliveredEvent?.timestamp ?? null,
-          lastUpdatedAt: last?.timestamp ?? null,
-          events,
-          source: 'myspeedpost.com',
-          fetchedAt: now,
-        };
-      }
-    }
+    const booking = article?.booking_details;
+    const events = this.mapEvents(article?.tracking_details ?? []);
 
-    // 2) Fallback: cached summary cards (last-known status when a live re-sync
-    // isn't possible). Reliably anchored on the Alpine `this.chunk([...])` call.
-    const cards = this.extractCards(html);
-    const card = (k: string) =>
-      cards?.find((c) => c.key === k)?.value ?? null;
-    const rawStatus = (card('current_status') || '').toString().trim();
-    if (rawStatus) {
-      // Strip a leading status emoji (e.g. "✅ Item Delivered") — the UI adds its own icon.
-      const currentStatus =
-        rawStatus.replace(/^[^\p{L}\p{N}]+/u, '').trim() || rawStatus;
-      const delivered = /deliver/i.test(currentStatus) || !!card('delivered_at');
+    if (!booking && !events.length) {
       return {
-        consignmentNumber: number,
-        available: true,
-        found: true,
-        partial: true,
+        ...base,
+        found: false,
+        partial: false,
         message:
-          'Live event timeline is temporarily unavailable — showing the last synced status.',
-        currentStatus,
-        currentStatusType: delivered ? 'Delivered' : 'InTransit',
-        delivered,
-        bookedAt: card('booked_on'),
-        deliveredAt: card('delivered_at'),
-        lastUpdatedAt: card('last_updated_at'),
+          'No tracking information found for this number yet. India Post only reports articles booked under our customer id.',
+        currentStatus: 'No tracking information found yet',
+        currentStatusType: 'Unknown',
+        delivered: false,
+        bookedAt: null,
+        deliveredAt: null,
+        lastUpdatedAt: null,
         events: [],
-        articleType: (card('article_type_text') as string) || undefined,
-        deliveryLocation: (card('delivery_location') as string) || undefined,
-        source: 'myspeedpost.com',
-        fetchedAt: now,
+        returnToSender: false,
       };
     }
 
-    // 3) Neither a timeline nor a cached status exists for this number.
+    const last = events[events.length - 1];
+    const first = events[0];
+
+    // "not delivered" contains the word, so a plain /deliver/ test isn't enough.
+    const delStatus = (article?.del_status?.del_status || '').trim();
+    const deliveredByStatus =
+      /deliver/i.test(delStatus) && !/^not\b/i.test(delStatus);
+    const deliveredEvent = [...events]
+      .reverse()
+      .find((e) => /delivered/i.test(e.event));
+    const delivered = Boolean(
+      deliveredByStatus || booking?.delivery_confirmed_on || deliveredEvent,
+    );
+
+    const currentStatus =
+      last?.event || (booking ? 'Booked — awaiting first scan' : 'Unknown');
+
     return {
-      consignmentNumber: number,
-      available: true,
-      found: false,
-      partial: false,
-      message: 'No tracking information found for this number yet.',
-      currentStatus: 'No tracking information found yet',
-      currentStatusType: 'Unknown',
-      delivered: false,
-      bookedAt: null,
-      deliveredAt: null,
-      lastUpdatedAt: null,
-      events: [],
-      source: 'myspeedpost.com',
-      fetchedAt: now,
+      ...base,
+      found: true,
+      // Booked, but India Post has recorded no scans against it yet.
+      partial: !events.length,
+      message: events.length
+        ? undefined
+        : 'Booked with India Post — no scans recorded against it yet.',
+      currentStatus,
+      currentStatusType: last?.eventType || 'Booked',
+      delivered,
+      bookedAt: booking?.booked_on || first?.timestamp || null,
+      deliveredAt:
+        booking?.delivery_confirmed_on || deliveredEvent?.timestamp || null,
+      lastUpdatedAt: last?.timestamp || booking?.booked_on || null,
+      events,
+      articleType: booking?.article_type || undefined,
+      deliveryLocation: booking?.delivery_location || undefined,
+      bookedAtOffice: booking?.booked_at || undefined,
+      originPincode: this.str(booking?.origin_pincode),
+      destinationPincode: this.str(booking?.destination_pincode),
+      tariff: typeof booking?.tariff === 'number' ? booking.tariff : undefined,
+      returnToSender: events.some((e) => e.rts),
     };
   }
 
-  private extractCards(
-    html: string,
-  ): Array<{ key: string; value: any }> | null {
-    const arr = this.extractJsonAfter('this.chunk(', html);
-    if (!arr) return null;
-    try {
-      return JSON.parse(arr);
-    } catch {
-      return null;
-    }
+  /**
+   * India Post returns scans newest-first; we sort oldest-first so `events[0]`
+   * is the booking and the last entry is the latest state.
+   */
+  private mapEvents(raw: IndiaPostTrackingEvent[]): TrackingEvent[] {
+    return raw
+      .map((e) => ({
+        timestamp: e.date,
+        event: e.event,
+        eventType: this.eventType(e.event),
+        office: e.office || '',
+        pincode: String(e.officeid ?? ''),
+        remarks: e.remarks || '',
+        rts: Boolean(e.rts),
+      }))
+      .sort(
+        (a, b) =>
+          new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+      );
   }
 
-  private decodeEntities(s: string): string {
-    return s
-      .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(parseInt(d, 10)))
-      .replace(/&#x([0-9a-fA-F]+);/g, (_, h) =>
-        String.fromCharCode(parseInt(h, 16)),
-      )
-      .replace(/&quot;/g, '"')
-      .replace(/&apos;/g, "'")
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&amp;/g, '&');
+  /** "Item Kept on Hold" → "ItemKeptOnHold", for callers matching on a code. */
+  private eventType(event: string): string {
+    return (event || '')
+      .replace(/[^A-Za-z0-9 ]+/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join('');
   }
 
-  /** Bracket-matches the JSON array/object that immediately follows `key`. */
-  private extractJsonAfter(key: string, s: string): string | null {
-    const i = s.indexOf(key);
-    if (i < 0) return null;
-    let j = i + key.length;
-    while (j < s.length && /\s/.test(s[j])) j++;
-    const open = s[j];
-    if (open !== '[' && open !== '{') return null;
-    const close = open === '[' ? ']' : '}';
-    let depth = 0;
-    let inStr = false;
-    let esc = false;
-    for (let k = j; k < s.length; k++) {
-      const c = s[k];
-      if (esc) {
-        esc = false;
-        continue;
-      }
-      if (c === '\\') {
-        esc = true;
-        continue;
-      }
-      if (c === '"') {
-        inStr = !inStr;
-        continue;
-      }
-      if (inStr) continue;
-      if (c === open) depth++;
-      else if (c === close) {
-        depth--;
-        if (depth === 0) return s.slice(j, k + 1);
-      }
-    }
-    return null;
+  private str(value: string | number | undefined): string | undefined {
+    if (value === undefined || value === null || value === '') return undefined;
+    return String(value);
   }
 }

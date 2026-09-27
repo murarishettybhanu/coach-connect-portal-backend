@@ -55,6 +55,12 @@ CORS is restricted to the frontend origins in `CORS_ORIGINS`. Also live in `main
 - `WHATSAPP_OTP_TEMPLATE_ID` — Meta **template id** for the authentication template
   that delivers verification codes (defaults to `1521285713364906`). Resolved to a
   name/language once at runtime and cached, since the send API takes a name
+- `INDIAPOST_BASE_URL` — India Post external-integration host. Defaults to UAT
+  (`https://test.cept.gov.in/beextcustomer`); point at production once India Post
+  issues production credentials
+- `INDIAPOST_USERNAME` / `INDIAPOST_PASSWORD` — login for `/v1/access/login`.
+  Without them the tracking endpoints return 503 with a clear message rather than
+  failing obscurely
 
 > Secrets live only in GitHub Actions secrets + the VM's gitignored `.env`. Never commit them.
 
@@ -91,7 +97,31 @@ src/
     orders/      # Order lifecycle, approvals, commission calc  ← most business logic
     transactions/# Wallet ledger, balance, payouts
     whatsapp/    # Public WhatsApp Cloud API webhook (inbound messages)
+    tracking/    # India Post consignment tracking (official Bulk Tracking API)
 ```
+
+### India Post tracking (`tracking/`)
+
+`IndiaPostApiService` is the transport: it owns the credentials, logs in at
+`POST /v1/access/login` and **caches the bearer token** (India Post's tokens live
+~15 minutes, so it refreshes on expiry rather than per request, de-duplicates
+concurrent logins, and retries once on a 401 in case a token lapsed in flight).
+`TrackingService` maps `POST /v1/tracking/bulk` onto our own `TrackingResult`.
+
+Three things that shape the mapping:
+- India Post returns scans **newest-first**; we sort them oldest-first so
+  `events[0]` is the booking and the last entry is the current state.
+- `del_status` is the string `"not delivered"` for undelivered articles — it
+  contains the word "delivered", so a plain `/deliver/` test reads backwards.
+- Articles India Post doesn't know are **omitted from the response** rather than
+  returned as an error, so callers match on `booking_details.article_number`.
+
+Two operational constraints, both from India Post's integration document:
+1. It only reports articles **booked under the same customer id** as the
+   credentials — parcels booked outside this integration come back "not found".
+2. Production access requires our **static IP to be whitelisted**. (The UAT host
+   resets the TLS handshake from unapproved networks, so it can't be smoke-tested
+   from a dev machine.)
 
 ## Data model (`src/schemas/`)
 
@@ -169,6 +199,9 @@ the ledger, not read off `coach.walletBalance` — the schema field is not the s
 - **orders**: `GET /me` & `GET /coach` (coach), `GET /pending-approvals` (admin/coach),
   `POST /` (public checkout), `GET /` (admin), `GET /:id`, `PATCH /:id/status` (admin),
   `PATCH /:id/approve` & `PATCH /:id/reject` (admin/coach)
+- **tracking** (admin/tribe): `GET /tracking/:consignmentNumber`,
+  `POST /tracking/bulk` (`{ consignmentNumbers: [] }`, max 500 — results come back
+  in the order asked for)
 - **transactions**: `GET /me` & `GET /my-balance` & `GET /coach` & `GET /balance` (coach),
   `POST /payout` (admin), `GET /` (admin)
 - **whatsapp**: `GET /whatsapp/webhook` (public — Meta's `hub.challenge` handshake,
