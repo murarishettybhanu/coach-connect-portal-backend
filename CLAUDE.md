@@ -413,6 +413,54 @@ Decide before starting:
 5. **Legacy orders** carry a size but were never counted per-size — reconcile
    from `sizeStock`, never by replaying order history.
 
+### Notifications — surface failed sends (planned, not built)
+
+Five automated WhatsApp flows now run without a human: dispatch, delivered and
+returned notifications to customers, plus the nightly digest and weekly report
+to tribe owners. Every one of them is **deliberately fire-and-forget and
+swallows its errors** — a messaging failure must not fail an admin's status
+change or stop the other tribes in a run. The cost is that nothing fails
+loudly: today a failure is visible only to whoever reads container logs.
+
+That cost is now deliberate on both sides. The scheduled jobs have **no
+catch-up** — a run missed because the container was restarting at 9pm is
+accepted rather than replayed (decision, 2026-09-27) — so notifications are the
+compensating control, which is what makes them worth building.
+
+**Two failure classes, and they arrive very differently:**
+
+1. **Send rejected** — the Graph call itself fails (bad number, closed window,
+   malformed template). Known synchronously, and *already persisted*:
+   `WhatsappMessage.sendStatus = FAILED` plus the error text, surfaced in the
+   admin inbox.
+2. **Accepted, then undelivered** — Meta accepts the send and reports
+   `status: failed` on the webhook minutes later: the number isn't on WhatsApp,
+   the user blocked the business, the template got paused for quality. Today
+   this is a single `logger.warn` in `handleWebhook` and is **neither persisted
+   nor surfaced**. This is the actual gap.
+
+Work, roughly 2 days: persist the webhook delivery statuses onto the message
+(`deliveredAt`/`readAt`/`failedAt` + error code, keyed on the already-unique
+`waMessageId`) · a notification feed with an unread count · surface it in the
+admin shell · wire the five flows and the two cron jobs to raise one.
+
+Decide before starting:
+1. **What deserves a notification.** A customer who isn't on WhatsApp is
+   routine and self-resolving; an expired access token or a paused template is
+   systemic and urgent. Without that triage the feed becomes noise and gets
+   ignored, which is worse than no feed.
+2. **Whether "didn't happen" counts too** — a scheduled run skipped because the
+   container was restarting, or a tribe skipped for a missing phone number,
+   aren't message failures but belong to the same "something silently didn't
+   happen" class, and are arguably the more valuable half.
+3. **Who sees them.** Admin-only is simplest; showing tribe owners their own
+   failures raises support load but catches bad customer numbers faster.
+4. **Where they land.** In-app only, email (SES is already wired), or WhatsApp
+   to an admin number — the last one fails in exactly the cases you most need
+   to hear about.
+5. **Grouping.** One notification per failed message, or one per run — 48
+   failures from a single expired token should not be 48 notifications.
+
 ## Known issues / tech debt
 
 **Resolved** (during the production-hardening pass — do not reintroduce): leaked
