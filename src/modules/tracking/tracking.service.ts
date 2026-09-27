@@ -54,10 +54,11 @@ const SOURCE = 'India Post';
  * Consignment status from India Post's official Bulk Tracking API
  * (`POST /v1/tracking/bulk`), mapped onto our own shape.
  *
- * India Post returns only articles booked under the same customer id as the
- * configured credentials, so an article we booked outside this integration
- * comes back as "not found" rather than as an error. See
- * `IndiaPostApiService` for the credentials and host configuration.
+ * An article India Post has no data for is not an error: the number is echoed
+ * back with every other field blank, and maps to `found: false`. Their document
+ * says only articles booked under our own customer id are reported; against UAT
+ * that restriction did not appear to bite, so treat it as unconfirmed rather
+ * than as a guarantee either way. See `IndiaPostApiService` for configuration.
  */
 @Injectable()
 export class TrackingService {
@@ -81,7 +82,9 @@ export class TrackingService {
 
     const articles = await this.indiaPost.trackBulk(numbers);
 
-    // Index the response by article number; India Post omits what it doesn't know.
+    // Index the response by article number. Every number asked for comes back,
+    // including ones India Post has no data for, so `map` decides what counts
+    // as actually known.
     const byNumber = new Map<string, IndiaPostArticle>();
     for (const article of articles) {
       const key = (article.booking_details?.article_number || '')
@@ -115,7 +118,17 @@ export class TrackingService {
     const booking = article?.booking_details;
     const events = this.mapEvents(article?.tracking_details ?? []);
 
-    if (!booking && !events.length) {
+    // An article India Post knows nothing about still comes back — with its
+    // number echoed and every other field blank — so the presence of a
+    // `booking_details` object proves nothing. Only real booking data counts.
+    const hasBooking = Boolean(
+      booking?.booked_on ||
+      booking?.booked_at ||
+      booking?.article_type ||
+      booking?.delivery_location,
+    );
+
+    if (!hasBooking && !events.length) {
       return {
         ...base,
         found: false,
@@ -147,8 +160,7 @@ export class TrackingService {
       deliveredByStatus || booking?.delivery_confirmed_on || deliveredEvent,
     );
 
-    const currentStatus =
-      last?.event || (booking ? 'Booked — awaiting first scan' : 'Unknown');
+    const currentStatus = last?.event || 'Booked — awaiting first scan';
 
     return {
       ...base,
@@ -171,19 +183,24 @@ export class TrackingService {
       bookedAtOffice: booking?.booked_at || undefined,
       originPincode: this.str(booking?.origin_pincode),
       destinationPincode: this.str(booking?.destination_pincode),
-      tariff: typeof booking?.tariff === 'number' ? booking.tariff : undefined,
+      // The API sends 0 for "not supplied", which would print as ₹0.
+      tariff:
+        typeof booking?.tariff === 'number' && booking.tariff > 0
+          ? booking.tariff
+          : undefined,
       returnToSender: events.some((e) => e.rts),
     };
   }
 
   /**
-   * India Post returns scans newest-first; we sort oldest-first so `events[0]`
-   * is the booking and the last entry is the latest state.
+   * Scan order is not guaranteed — the integration document's samples are
+   * newest-first and the live UAT API answers oldest-first — so we sort rather
+   * than trust it: `events[0]` is the earliest and the last entry is current.
    */
   private mapEvents(raw: IndiaPostTrackingEvent[]): TrackingEvent[] {
     return raw
       .map((e) => ({
-        timestamp: e.date,
+        timestamp: this.timestamp(e),
         event: e.event,
         eventType: this.eventType(e.event),
         office: e.office || '',
@@ -195,6 +212,22 @@ export class TrackingService {
         (a, b) =>
           new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
       );
+  }
+
+  /**
+   * The live API zeroes the clock in `date` ("2026-02-19T00:00:00Z") and carries
+   * the real time in `time` ("17:44:15"), so a scan's own date is not enough to
+   * order same-day events or to show when anything happened. Stitch them back
+   * together; entries that already carry a time (as the document's samples do)
+   * are left alone.
+   */
+  private timestamp(e: IndiaPostTrackingEvent): string {
+    const date = (e.date || '').trim();
+    const time = (e.time || '').trim();
+    if (!date || !time) return date;
+    return /T00:00:00(\.0+)?(Z|[+-]\d{2}:?\d{2})?$/.test(date)
+      ? date.replace(/T00:00:00(\.0+)?/, `T${time}`)
+      : date;
   }
 
   /** "Item Kept on Hold" → "ItemKeptOnHold", for callers matching on a code. */

@@ -10,7 +10,8 @@ import {
 export interface IndiaPostBookingDetails {
   article_number: string;
   booked_at?: string;
-  booked_on?: string;
+  /** Null for an article India Post has no booking record for. */
+  booked_on?: string | null;
   origin_pincode?: string | number;
   destination_pincode?: string | number;
   tariff?: number;
@@ -19,16 +20,23 @@ export interface IndiaPostBookingDetails {
   delivery_confirmed_on?: string | null;
 }
 
-/** One scan in `tracking_details`. */
+/**
+ * One scan in `tracking_details`.
+ *
+ * Verified against the live UAT API, which is looser than the integration
+ * document: `date` carries the day with the clock zeroed and the real time
+ * lives in `time`; `officeid` comes back as a number; and `remarks`/`rts` are
+ * absent from every entry even though the document shows them.
+ */
 export interface IndiaPostTrackingEvent {
   date: string;
-  time: string;
-  office: string;
-  officeid: string;
+  time?: string;
+  office?: string;
+  officeid?: string | number;
   event: string;
-  remarks: string;
-  /** Returned to sender. */
-  rts: boolean;
+  remarks?: string;
+  /** Returned to sender. Documented, but not sent by the UAT API. */
+  rts?: boolean;
 }
 
 export interface IndiaPostArticle {
