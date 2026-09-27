@@ -28,9 +28,11 @@ const NOT_REJECTED = { approvalStatus: { $ne: ApprovalStatus.REJECTED } };
 // Overridable by env so a re-approved template can be swapped without a deploy.
 const DISPATCH_TEMPLATE_ID = '1057815553754091';
 const DELIVERED_TEMPLATE_ID = '1419053503494614';
+const RETURNED_TEMPLATE_ID = '1590261155917388';
 
-// Both order templates were approved with an IMAGE header, so every send needs
-// one, and Meta fetches it from a public URL at send time.
+// The dispatch and delivered templates were approved with an IMAGE header, so
+// those sends need one and Meta fetches it from a public URL at send time. The
+// returned template has no header, and is sent without an image.
 //
 // Each notification has its own fixed picture, served by the frontend so the
 // URL is stable and versioned with the site. Either can be overridden by env
@@ -564,7 +566,13 @@ export class OrdersService {
     if (note) order.returnNote = note;
     if (!order.statusHistory) order.statusHistory = [] as any;
     order.statusHistory.push({ status: OrderStatus.RETURNED, at: now, note });
-    return order.save();
+    const saved = await order.save();
+
+    // Ask the customer to confirm their address, since an undelivered parcel is
+    // usually a bad one. Deliberately not awaited, and it never throws: logging
+    // a return at the packing bench must not fail because WhatsApp is slow.
+    void this.notifyCustomerOfStatus(String(order._id), OrderStatus.RETURNED);
+    return saved;
   }
 
   /** Admin: returned parcels, paginated and searchable (tracking number included). */
@@ -1018,7 +1026,8 @@ export class OrdersService {
   }
 
   /**
-   * Tells the customer their parcel has shipped or arrived, over WhatsApp.
+   * Tells the customer their parcel has shipped, arrived, or come back to us,
+   * over WhatsApp.
    *
    * Never throws: a messaging failure must not look like a failed status
    * update. Templates are allowed outside the 24-hour window, which is the
@@ -1033,7 +1042,9 @@ export class OrdersService {
         ? process.env.WHATSAPP_DISPATCH_TEMPLATE_ID || DISPATCH_TEMPLATE_ID
         : status === OrderStatus.DELIVERED
           ? process.env.WHATSAPP_DELIVERED_TEMPLATE_ID || DELIVERED_TEMPLATE_ID
-          : null;
+          : status === OrderStatus.RETURNED
+            ? process.env.WHATSAPP_RETURNED_TEMPLATE_ID || RETURNED_TEMPLATE_ID
+            : null;
     if (!templateId) return;
 
     if (!this.whatsapp.canSend) {
@@ -1060,12 +1071,17 @@ export class OrdersService {
         order.items?.[0]?.productId?.name ||
         'order';
 
+      // Only the dispatch and delivered templates carry a media header. The
+      // returned one has no header at all, and offering an image for a template
+      // that declares none is pointless — `sendTemplateByIdTo` drops it anyway.
       const headerImageUrl =
         status === OrderStatus.DISPATCHED
           ? process.env.WHATSAPP_DISPATCH_IMAGE_URL || DISPATCH_IMAGE_URL
-          : process.env.WHATSAPP_DELIVERED_IMAGE_URL ||
-            DELIVERED_IMAGE_URL ||
-            DEFAULT_ORDER_IMAGE_URL;
+          : status === OrderStatus.DELIVERED
+            ? process.env.WHATSAPP_DELIVERED_IMAGE_URL ||
+              DELIVERED_IMAGE_URL ||
+              DEFAULT_ORDER_IMAGE_URL
+            : undefined;
 
       await this.whatsapp.sendTemplateByIdTo(
         phone,
