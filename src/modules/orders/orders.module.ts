@@ -4,6 +4,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { OrdersService } from './orders.service';
 import { DispatchDigestService } from './dispatch-digest.service';
+import { WeeklyReportService } from './weekly-report.service';
 import { OrdersController } from './orders.controller';
 import { Order, OrderSchema } from '../../schemas/order.schema';
 import { Campaign, CampaignSchema } from '../../schemas/campaign.schema';
@@ -32,8 +33,8 @@ import { WhatsappModule } from '../whatsapp/whatsapp.module';
       inject: [ConfigService],
     }),
   ],
-  providers: [OrdersService, DispatchDigestService],
+  providers: [OrdersService, DispatchDigestService, WeeklyReportService],
   controllers: [OrdersController],
-  exports: [OrdersService, DispatchDigestService],
+  exports: [OrdersService, DispatchDigestService, WeeklyReportService],
 })
 export class OrdersModule {}

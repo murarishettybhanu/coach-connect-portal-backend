@@ -36,6 +36,8 @@ services:
       WHATSAPP_DIGEST_TEST_NUMBER: ${WHATSAPP_DIGEST_TEST_NUMBER:-}
       WHATSAPP_DIGEST_ENABLED: ${WHATSAPP_DIGEST_ENABLED:-}
       WHATSAPP_DIGEST_TEMPLATE_ID: ${WHATSAPP_DIGEST_TEMPLATE_ID:-1393420296257983}
+      # Friday 6pm IST weekly fulfilment report; same on/off switches as above.
+      WHATSAPP_WEEKLY_TEMPLATE_ID: ${WHATSAPP_WEEKLY_TEMPLATE_ID:-1638054397686424}
       # India Post external-integration API (consignment tracking). Defaults to
       # the UAT host; switch to the production host once India Post issues
       # production credentials and whitelists this VM's IP.

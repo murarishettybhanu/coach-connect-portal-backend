@@ -344,6 +344,26 @@ Sending is off unless configured: `WHATSAPP_DIGEST_TEST_NUMBER` routes every
 digest to one number (rollout step 1), `WHATSAPP_DIGEST_ENABLED=true` sends to
 real owners, neither set computes and logs only.
 
+## Weekly fulfilment report (`orders/weekly-report.service.ts`)
+
+Fridays at 6pm IST (template `weekly_dispatch_report`, id `1638054397686424`),
+covering the seven days since the previous Friday 6pm.
+
+It answers a **different question from the nightly digest**: that one counts
+**dispatches**, this one counts **deliveries and returns**, because that is what
+the template asks for. An order delivered and then returned inside the same week
+appears in both columns, which is correct, not double counting.
+
+- The cut-off is Friday 18:00 IST = **12:30 UTC**; on a Friday before 6pm the
+  week hasn't closed, so it reports the *previous* Friday's week. Tests pin both.
+- Counts come from `statusHistory` transitions inside the window, not from the
+  order's current status — an order delivered on Monday and returned on Thursday
+  must show in both totals.
+- Kept as a separate service from `DispatchDigestService` on purpose: that job
+  runs nightly in production and a different aggregation wasn't worth
+  destabilising it for. The overlap in shape is the deliberate cost.
+- Shares the digest's on/off switches, so one setting governs both jobs.
+
 ## Future scope
 
 ### Per-size inventory (planned, not built)
