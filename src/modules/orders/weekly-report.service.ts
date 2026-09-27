@@ -112,15 +112,11 @@ export class WeeklyReportService {
       }
 
       try {
-        await this.whatsapp.sendTemplateByIdTo(to, templateId, {
-          client_name: titleCaseName(report.ownerName) || report.brand,
-          client_brand: report.brand,
-          week_start_date: this.formatDate(start),
-          week_end_date: this.formatDate(end),
-          weekly_product_summary: summary,
-          total_delivered: String(report.totalDelivered),
-          total_returned: String(report.totalReturned),
-        });
+        await this.whatsapp.sendTemplateByIdTo(
+          to,
+          templateId,
+          this.templateValues(report, start, end),
+        );
       } catch (err) {
         // One tribe's failure must not stop the rest of the run.
         this.logger.error(
@@ -130,6 +126,36 @@ export class WeeklyReportService {
     }
 
     return reports;
+  }
+
+  /**
+   * The values offered to the template. `sendTemplateByIdTo` sends only the
+   * placeholders the template actually declares, so listing a name the template
+   * doesn't use costs nothing.
+   *
+   * The summary is offered under two names on purpose. The template was
+   * approved with `{{weekly_product_summary}}`, which is 22 characters — and
+   * Meta refuses any `parameter_name` over 20 at send time, so as approved it
+   * cannot send at all. Once the variable is renamed to `product_summary` in
+   * WhatsApp Manager this starts working with no deploy; until then it keeps
+   * failing loudly rather than silently sending something wrong.
+   */
+  templateValues(
+    report: TribeWeeklyReport,
+    start: Date,
+    end: Date,
+  ): Record<string, string> {
+    const summary = this.summaryText(report.lines);
+    return {
+      client_name: titleCaseName(report.ownerName) || report.brand,
+      client_brand: report.brand,
+      week_start_date: this.formatDate(start),
+      week_end_date: this.formatDate(end),
+      product_summary: summary,
+      weekly_product_summary: summary,
+      total_delivered: String(report.totalDelivered),
+      total_returned: String(report.totalReturned),
+    };
   }
 
   /**
@@ -275,7 +301,7 @@ export class WeeklyReportService {
   }
 
   /** The template's example uses YYYY/MM/DD. */
-  private formatDate(date: Date): string {
+  formatDate(date: Date): string {
     const parts = new Intl.DateTimeFormat('en-CA', {
       timeZone: TIMEZONE,
       year: 'numeric',

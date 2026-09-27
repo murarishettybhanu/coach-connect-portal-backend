@@ -75,3 +75,48 @@ describe('WeeklyReportService.summaryText', () => {
     expect(service.summaryText([]).length).toBeGreaterThan(0);
   });
 });
+
+describe('WeeklyReportService.templateValues', () => {
+  const report = {
+    tribeId: 't1',
+    brand: 'Canvas Of Heritage',
+    ownerName: 'ARUN NN',
+    phone: '9999999999',
+    totalDelivered: 4,
+    totalReturned: 1,
+    lines: [{ product: 'Diamond Kit', delivered: 4, returned: 1 }],
+  };
+  const values = service.templateValues(
+    report,
+    new Date('2026-09-18T12:30:00Z'),
+    new Date('2026-09-25T12:30:00Z'),
+  );
+
+  it('keeps every parameter_name within Meta’s 20-character limit', () => {
+    // The approved template's own `weekly_product_summary` is 22 and is
+    // rejected at send time; it is offered only until the rename lands.
+    const sendable = Object.keys(values).filter(
+      (k) => k !== 'weekly_product_summary',
+    );
+    for (const key of sendable) expect(key.length).toBeLessThanOrEqual(20);
+  });
+
+  it('offers the summary under both the old and the renamed key', () => {
+    expect(values.product_summary).toBe(values.weekly_product_summary);
+    expect(values.product_summary).toContain('Diamond Kit');
+  });
+
+  it('formats the week dates as the template expects', () => {
+    expect(values.week_start_date).toBe('2026/09/18');
+    expect(values.week_end_date).toBe('2026/09/25');
+  });
+
+  it('title-cases the owner name and keeps initials', () => {
+    expect(values.client_name).toBe('Arun NN');
+  });
+
+  it('sends totals as strings — Meta rejects non-string parameters', () => {
+    expect(values.total_delivered).toBe('4');
+    expect(values.total_returned).toBe('1');
+  });
+});
