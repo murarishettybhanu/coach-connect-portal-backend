@@ -87,6 +87,14 @@ jobs:
             EOF
             chmod 600 .env
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            # Each deploy leaves the image it replaced untagged. Nothing removed
+            # them, so 29 of them (12GB) filled the 19GB disk and the pull failed
+            # with "no space left on device". Drop untagged images BEFORE pulling,
+            # so the new layers have room: the running image still holds the
+            # :latest tag at this point, so it is never a candidate, and it stays
+            # available as this run's rollback target.
+            docker image prune -f >/dev/null 2>&1 || true
+            echo "disk before pull: $(df -h / | awk 'NR==2 {print $4" free ("$5" used)"}')"
             # Remember the currently-running image so we can roll back if the new one is unhealthy.
             PREV_IMG=$(docker inspect --format '{{.Image}}' "$(docker compose ps -q backend)" 2>/dev/null || echo "")
             docker compose pull backend
