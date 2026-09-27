@@ -17,6 +17,7 @@ import { BarcodesService } from '../barcodes/barcodes.service';
 import { BarcodeType } from '../../schemas/barcode.schema';
 import { WhatsappOtpService } from '../whatsapp/whatsapp-otp.service';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
+import { titleCaseName } from '../../common/utils/name.util';
 
 // A rejected claim is dead: no dispatch, no commission. Order listings exclude
 // them so the tables only hold work that still matters. `$ne` also matches the
@@ -1070,7 +1071,11 @@ export class OrdersService {
         phone,
         templateId,
         {
-          customer_name: order.shippingAddress?.fullName || 'there',
+          // Names arrive from the public form in whatever case was typed, and
+          // "Hi RAVI KUMAR" reads as shouting. The fallback stays lowercase
+          // because it sits mid-sentence ("Hi there").
+          customer_name:
+            titleCaseName(order.shippingAddress?.fullName) || 'there',
           client_brand: coach.brand || coach.name || 'Tribe Merchandise',
           kit_name: kitName,
           // Meta rejects an empty parameter, so never send a blank tracking id.
