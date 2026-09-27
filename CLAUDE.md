@@ -127,16 +127,32 @@ the document's samples.** Verified against UAT from the production host:
   contains the word "delivered", so a plain `/deliver/` test reads backwards.
 
 Operational notes:
-1. Their document says only articles **booked under our own customer id** are
-   reported. Against UAT that restriction did not appear to bite (arbitrary real
-   article numbers returned data), so treat it as unconfirmed. It matters because
-   we book by handing over a CSV, not through their Booking API.
-2. India Post **filters callers by IP**: the UAT host resets the TLS handshake
+
+1. **⚠️ Tracking returns nothing for real parcels right now, and that is expected.**
+   Production points at **UAT**, and UAT carries its own synthetic dataset that is
+   **disjoint from live India Post data**. Measured 2026-09-27 across 30 real
+   dispatched/delivered orders: India Post knew **0 of 30**. The two directions
+   both fail, which is what proves it:
+
+   | Article | UAT API | Public tracking |
+   |---|---|---|
+   | `CA187141418IN` (a real parcel of ours) | no data | 19 events, delivered |
+   | `EY011867595IN` (a UAT sample) | 6 events | no data |
+
+   So this is **not** customer-id scoping and **not** a mapping bug — the fix is
+   production credentials, nothing else. Don't re-debug the code over it.
+   **Decision (2026-09-27):** leave the feature dark until India Post completes
+   onboarding (§2 of their document, `integrations.cept@indiapost.gov.in`); a
+   scrape fallback was considered and declined. Switching over is
+   `INDIAPOST_BASE_URL` + real credentials, no code change.
+2. Their document also says only articles **booked under our own customer id** are
+   reported. Untested — the UAT dataset gap masks it. It may bite once production
+   credentials land, because we book by handing over a CSV rather than through
+   their Booking API. That is the next thing to check, not the first.
+3. India Post **filters callers by IP**: the UAT host resets the TLS handshake
    from unapproved networks, so it cannot be smoke-tested from a dev machine. The
    EC2 reaches it fine, so verify from there (`docker compose exec backend node -e …`).
-3. Production currently points at **UAT** (`INDIAPOST_BASE_URL`) with the sandbox
-   credentials from the document — deliberate, pending India Post onboarding.
-   Tokens come back with `expires_in: 900`.
+   Tokens come back with `expires_in: 900`, matching the cache's assumption.
 
 ## Data model (`src/schemas/`)
 
