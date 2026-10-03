@@ -11,6 +11,8 @@ import type { Response } from 'express';
 import archiver = require('archiver');
 import { Order, OrderStatus, OrderType, ApprovalStatus } from '../../schemas/order.schema';
 import { Campaign, CampaignFormType } from '../../schemas/campaign.schema';
+import { TribeKit } from '../../schemas/tribe-kit.schema';
+import { allocate, allocateUnitPrices, roundMoney } from '../../common/kit-pricing';
 import { ProductsService } from '../products/products.service';
 import { TransactionsService } from '../transactions/transactions.service';
 import { TransactionType } from '../../schemas/transaction.schema';
@@ -76,6 +78,10 @@ const DISPATCH_IMAGE_URL = 'https://tribemerchandise.com/whatsapp-dispatch.jpg';
 const DELIVERED_IMAGE_URL = 'https://tribemerchandise.com/whatsapp-delivered.jpg';
 const DEFAULT_ORDER_IMAGE_URL = 'https://tribemerchandise.com/tribe-logo.png';
 
+// Units on a requested order line (the DTO caps it; this floors junk to 1).
+const lineQuantity = (item: any): number =>
+  Math.max(1, Math.floor(Number(item?.quantity)) || 1);
+
 // The size a stored order line was claimed in, so its stock moves in that size.
 const sizeOf = (item: any): string | undefined =>
   item?.customizationType === 'SIZE' ? item.customizationValue : undefined;
@@ -111,7 +117,51 @@ export class OrdersService {
     private barcodesService: BarcodesService,
     private otpService: WhatsappOtpService,
     private whatsapp: WhatsappService,
+    // Read-only: a kit-linked campaign's price can come from its kit.
+    @InjectModel(TribeKit.name) private kitModel: Model<TribeKit>,
   ) {}
+
+  /**
+   * A campaign order must take exactly the campaign's contents: for each
+   * campaign product, its lines (one per customization value) add up to the
+   * product's quantity — 1 on lines saved before quantities existed — and
+   * nothing else is in the order. A product deleted since the campaign was
+   * made is the one exception: the claim form never shows it, so it may be
+   * left out.
+   */
+  private async assertCampaignQuantities(campaign: any, rawItems: any[]) {
+    const required = new Map<string, number>();
+    for (const cp of campaign.products || []) {
+      const id = String(cp.productId);
+      required.set(id, (required.get(id) ?? 0) + (cp.quantity || 1));
+    }
+    const sent = new Map<string, number>();
+    for (const item of rawItems) {
+      const id = String(item.productId);
+      sent.set(id, (sent.get(id) ?? 0) + lineQuantity(item));
+    }
+    const mismatch = () => new BadRequestException("Quantities don't match this campaign");
+    for (const [id, qty] of sent) {
+      if (required.get(id) !== qty) throw mismatch();
+    }
+    for (const id of required.keys()) {
+      if (sent.has(id)) continue;
+      const product: any = await this.productsService.findOne(id).catch(() => null);
+      if (product && !product.isDeleted) throw mismatch();
+    }
+  }
+
+  /**
+   * The price a kit-linked campaign charges for one claim: its own override,
+   * else the kit's price; null when neither is set (or it isn't linked), in
+   * which case lines are priced one by one as before.
+   */
+  private async effectiveKitPrice(campaign: any): Promise<number | null> {
+    if (!campaign?.kitId) return null;
+    if (campaign.kitPrice != null) return roundMoney(campaign.kitPrice);
+    const kit: any = await this.kitModel.findById(campaign.kitId).select('kitPrice').lean().exec();
+    return kit?.kitPrice != null ? roundMoney(kit.kitPrice) : null;
+  }
 
   // Public endpoint — NEVER trust client-supplied coachId / type / prices.
   // The campaign (or the products themselves) is the source of truth; this
@@ -140,6 +190,7 @@ export class OrdersService {
       if (campaign.status && campaign.status !== 'ACTIVE') {
         throw new BadRequestException('This campaign is not accepting orders');
       }
+      await this.assertCampaignQuantities(campaign, rawItems);
     }
 
     const type: OrderType = campaign ? campaign.type : OrderType.STORE_SALE;
@@ -215,7 +266,7 @@ export class OrdersService {
         throw new BadRequestException('Upload the photo through the form before ordering');
       }
 
-      const quantity = Math.max(1, Math.floor(Number(item.quantity)) || 1);
+      const quantity = lineQuantity(item);
       // SERVER-DERIVED price — ignore whatever the client sent.
       const retailPrice =
         type === OrderType.STORE_SALE
@@ -238,6 +289,8 @@ export class OrdersService {
         retailPrice,
         baseCost: product.baseProductionCost,
         commission,
+        // Weight for kit-price allocation below; not stored.
+        productRetail: product.retailPrice || 0,
         ...(item.customizationType
           ? { customizationType: item.customizationType, customizationValue: item.customizationValue }
           : {}),
@@ -245,6 +298,26 @@ export class OrdersService {
     }
 
     if (!coachId) throw new BadRequestException('Could not resolve the tribe for this order');
+
+    // A kit-linked store sale charges the kit price P for the whole claim, not
+    // the sum of its lines. P (as per-unit prices) and the commission it leaves
+    // (never negative) are spread over the lines by retail value, to the
+    // paisa, so the lines add up to the totals — see allocateUnitPrices for
+    // the one case a unit price can't land exactly.
+    const kitPrice = type === OrderType.STORE_SALE ? await this.effectiveKitPrice(campaign) : null;
+    if (kitPrice != null) {
+      const retailValues = itemsWithDetails.map((l) => (l.productRetail || 0) * l.quantity);
+      const quantities = itemsWithDetails.map((l) => l.quantity);
+      totalAmount = kitPrice;
+      totalCommission = Math.max(0, roundMoney(kitPrice - totalCost));
+      const unitPrices = allocateUnitPrices(totalAmount, retailValues, quantities);
+      const commissions = allocate(totalCommission, retailValues, quantities);
+      itemsWithDetails.forEach((line, i) => {
+        line.retailPrice = unitPrices[i];
+        line.commission = commissions[i];
+      });
+    }
+    for (const line of itemsWithDetails) delete line.productRetail;
 
     // Explicit build — do NOT spread client orderData (mass-assignment guard).
     const order = new this.orderModel({

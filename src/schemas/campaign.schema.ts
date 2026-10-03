@@ -33,16 +33,31 @@ export class Campaign extends Document {
   @Prop({ required: true, enum: CampaignType })
   type: CampaignType;
 
+  // Units of each product one claim takes. Campaigns made before quantities
+  // existed have no `quantity` on their lines — read those as 1 (lean reads
+  // skip schema defaults, so code must not rely on the default being there).
   @Prop({
     type: [{
       productId: { type: MongooseSchema.Types.ObjectId, ref: 'Product' },
       retailPrice: Number,
+      quantity: { type: Number, default: 1 },
     }]
   })
   products: {
     productId: MongooseSchema.Types.ObjectId;
     retailPrice?: number; // Only for STORE_SALE
+    quantity?: number;
   }[];
+
+  // A campaign made "from a kit" is linked to it: its products are the kit's
+  // (kept in sync on every kit edit) and can't be edited here. null = not linked.
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'TribeKit', default: null })
+  kitId: MongooseSchema.Types.ObjectId | null;
+
+  // Per-campaign override of the kit's price; null = follow the kit's kitPrice.
+  // Only meaningful while linked.
+  @Prop({ type: Number, default: null })
+  kitPrice: number | null;
 
   @Prop({ required: true, unique: true })
   slug: string; // Used for campaign URL
@@ -71,8 +86,8 @@ export class Campaign extends Document {
   description?: string;
 
   // Shown on the "thank you" screen after someone submits the claim form.
-  // Blank falls back to the standard copy in the form. Capped because this
-  // module takes untyped input — there's no DTO on campaigns.
+  // Blank falls back to the standard copy in the form. Capped here as well as
+  // in the campaign DTO.
   @Prop({ maxlength: 600 })
   successMessage?: string;
 
@@ -96,3 +111,5 @@ export class Campaign extends Document {
 export const CampaignSchema = SchemaFactory.createForClass(Campaign);
 
 CampaignSchema.index({ coachId: 1 });
+// Kit edits sync, and kit delete/deactivate checks, every linked campaign.
+CampaignSchema.index({ kitId: 1 });

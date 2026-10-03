@@ -17,6 +17,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../schemas/user.schema';
 import { CurrentUserId } from '../../common/decorators/current-user.decorator';
+import { CreateTribeKitDto, UpdateTribeKitDto } from './dto/tribe-kit.dto';
 
 // Tribe kits are authored by admin (in the coach detail page) and read by both
 // admin and the owning coach (for campaign selection).
@@ -30,7 +31,7 @@ export class TribeKitsController {
 
   @Post()
   @Roles(UserRole.ADMIN)
-  create(@Body() body: any) {
+  create(@Body() body: CreateTribeKitDto) {
     return this.kits.create(body);
   }
 
@@ -50,7 +51,7 @@ export class TribeKitsController {
 
   @Patch(':id')
   @Roles(UserRole.ADMIN)
-  update(@Param('id') id: string, @Body() body: any) {
+  update(@Param('id') id: string, @Body() body: UpdateTribeKitDto) {
     return this.kits.update(id, body);
   }
 

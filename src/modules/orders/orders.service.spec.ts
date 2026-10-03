@@ -69,6 +69,7 @@ function setup() {
     releaseFromOrder: jest.fn().mockResolvedValue(undefined),
     releaseOne: jest.fn().mockResolvedValue(undefined),
   };
+  const kitModel: any = { findById: jest.fn(() => query(null)) };
   const otp = { checkProof: jest.fn().mockReturnValue({ ok: true }) };
   const whatsapp = { canSend: false, sendTemplateByIdTo: jest.fn() };
 
@@ -80,6 +81,7 @@ function setup() {
     barcodes as any,
     otp as any,
     whatsapp as any,
+    kitModel,
   );
   return {
     service,
@@ -89,6 +91,7 @@ function setup() {
     transactions,
     barcodes,
     otp,
+    kitModel,
   };
 }
 
@@ -467,5 +470,191 @@ describe('OrdersService.findAllPaginated tribe filter', () => {
 
   it('rejects a malformed id instead of matching nothing', async () => {
     await expect(run(`${TRIBE_ID},nope`)).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+describe('OrdersService.create — campaign quantities and kit pricing', () => {
+  const P1 = new Types.ObjectId().toString();
+  const P2 = new Types.ObjectId().toString();
+  const P3 = new Types.ObjectId().toString();
+  const CAMPAIGN_ID = new Types.ObjectId().toString();
+  const KIT_ID = new Types.ObjectId().toString();
+  // P1: cost 100 / retail 300; P2: cost 50 / retail 120; P3: cost 10 / retail 0.
+  const catalog: Record<string, any> = {
+    [P1]: { _id: P1, coachId: TRIBE_ID, baseProductionCost: 100, retailPrice: 300 },
+    [P2]: { _id: P2, coachId: TRIBE_ID, baseProductionCost: 50, retailPrice: 120 },
+    [P3]: { _id: P3, coachId: TRIBE_ID, baseProductionCost: 10, retailPrice: 0 },
+  };
+
+  function campaignSetup(campaign: any, deleted: string[] = []) {
+    const ctx = setup();
+    ctx.products.findOne.mockImplementation(async (id: string) => {
+      if (!catalog[id]) throw new Error('not found');
+      return { ...catalog[id], isDeleted: deleted.includes(id) };
+    });
+    ctx.campaignModel.findById.mockReturnValue(
+      query({ _id: CAMPAIGN_ID, coachId: TRIBE_ID, status: 'ACTIVE', ...campaign }),
+    );
+    ctx.orderModel.save.mockImplementation(function (this: any) {
+      return Promise.resolve(this);
+    });
+    return ctx;
+  }
+
+  const claim = (items: any[]) =>
+    ({ ...storeOrder, campaignId: CAMPAIGN_ID, items }) as any;
+  const line = (productId: string, quantity: number, size?: string) => ({
+    productId,
+    quantity,
+    ...(size ? { customizationType: 'SIZE', customizationValue: size } : {}),
+  });
+
+  const kitCampaign = {
+    type: OrderType.WELCOME_KIT,
+    products: [
+      { productId: P1, quantity: 2 },
+      { productId: P2, quantity: 1 },
+    ],
+  };
+
+  it('accepts a product split over sizes that sums to the campaign quantity', async () => {
+    const { service, products } = campaignSetup(kitCampaign);
+    const order: any = await service.create(
+      claim([line(P1, 1, 'M'), line(P1, 1, 'L'), line(P2, 1)]),
+      { trusted: true },
+    );
+    expect(order.items.map((i: any) => [i.quantity, i.customizationValue])).toEqual([
+      [1, 'M'],
+      [1, 'L'],
+      [1, undefined],
+    ]);
+    expect(products.decrementStock).toHaveBeenCalledWith(P1, 1, 'M');
+    expect(products.decrementStock).toHaveBeenCalledWith(P1, 1, 'L');
+    expect(order.items.every((i: any) => !('productRetail' in i))).toBe(true);
+  });
+
+  it.each([
+    ['too few of a product', [line(P1, 1), line(P2, 1)]],
+    ['too many of a product', [line(P1, 2), line(P2, 2)]],
+    ['a public claimer asking for 100', [line(P1, 100), line(P2, 1)]],
+    ['a missing product', [line(P1, 2)]],
+    ['an extra product', [line(P1, 2), line(P2, 1), line(P3, 1)]],
+  ])('refuses %s, before any stock moves', async (_label, items) => {
+    const { service, products } = campaignSetup(kitCampaign);
+    await expect(service.create(claim(items), { trusted: true })).rejects.toThrow(
+      "Quantities don't match this campaign",
+    );
+    expect(products.decrementStock).not.toHaveBeenCalled();
+  });
+
+  it('applies to public claims too (after the phone proof)', async () => {
+    const { service } = campaignSetup(kitCampaign);
+    await expect(
+      service.create({
+        ...claim([line(P1, 5), line(P2, 1)]),
+        otpToken: 'proof',
+        shippingAddress: { ...storeOrder.shippingAddress, landmark: 'x', sectorVillage: 'y' },
+      }),
+    ).rejects.toThrow("Quantities don't match this campaign");
+  });
+
+  it('reads legacy campaign lines (no quantity) as 1', async () => {
+    const legacy = { type: OrderType.WELCOME_KIT, products: [{ productId: P1 }, { productId: P2 }] };
+    let ctx = campaignSetup(legacy);
+    await expect(
+      ctx.service.create(claim([line(P1, 1), line(P2, 1)]), { trusted: true }),
+    ).resolves.toBeDefined();
+    ctx = campaignSetup(legacy);
+    await expect(
+      ctx.service.create(claim([line(P1, 2), line(P2, 1)]), { trusted: true }),
+    ).rejects.toThrow("Quantities don't match this campaign");
+  });
+
+  it('lets a claim leave out a campaign product deleted since', async () => {
+    const { service } = campaignSetup(kitCampaign, [P2]);
+    await expect(
+      service.create(claim([line(P1, 2)]), { trusted: true }),
+    ).resolves.toBeDefined();
+  });
+
+  const kitSale = (extra: any = {}) => ({
+    type: OrderType.STORE_SALE,
+    kitId: KIT_ID,
+    kitPrice: null,
+    products: [
+      { productId: P1, quantity: 2, retailPrice: 300 },
+      { productId: P2, quantity: 1, retailPrice: 120 },
+    ],
+    ...extra,
+  });
+  const sum = (ns: number[]) => Math.round(ns.reduce((a, b) => a + b, 0) * 100) / 100;
+  const twoDp = (n: number) => Math.round(n * 100) / 100 === n;
+
+  it('charges the kit price, split over lines that sum to it exactly', async () => {
+    // Cost = 2×100 + 50 = 250; P = 1000.01; commission = 750.01.
+    const { service, kitModel, transactions } = campaignSetup(kitSale());
+    kitModel.findById.mockReturnValue(query({ kitPrice: 1000.01 }));
+    const order: any = await service.create(
+      claim([line(P1, 1, 'M'), line(P1, 1, 'L'), line(P2, 1)]),
+      { trusted: true },
+    );
+    expect(order.totalAmount).toBe(1000.01);
+    expect(order.totalCost).toBe(250);
+    expect(order.totalCommission).toBe(750.01);
+    const amounts = order.items.map((i: any) => i.retailPrice * i.quantity);
+    const commissions = order.items.map((i: any) => i.commission);
+    expect(sum(amounts)).toBe(1000.01);
+    expect(sum(commissions)).toBe(750.01);
+    expect([...amounts, ...commissions].every(twoDp)).toBe(true);
+    // Weighted by retail value: 300 : 300 : 120.
+    expect(order.items.map((i: any) => i.retailPrice)).toEqual([416.67, 416.67, 166.67]);
+    expect(transactions.create).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: 750.01 }),
+    );
+  });
+
+  it('a campaign override wins over the kit price', async () => {
+    const { service, kitModel } = campaignSetup(kitSale({ kitPrice: 600 }));
+    const order: any = await service.create(claim([line(P1, 2), line(P2, 1)]), {
+      trusted: true,
+    });
+    expect(kitModel.findById).not.toHaveBeenCalled();
+    expect(order.totalAmount).toBe(600);
+    expect(order.totalCommission).toBe(350);
+    expect(sum(order.items.map((i: any) => i.commission))).toBe(350);
+  });
+
+  it('never records negative commission when the price is under cost', async () => {
+    const { service, transactions } = campaignSetup(kitSale({ kitPrice: 200 }));
+    const order: any = await service.create(claim([line(P1, 2), line(P2, 1)]), {
+      trusted: true,
+    });
+    expect(order.totalAmount).toBe(200);
+    expect(order.totalCommission).toBe(0);
+    expect(order.items.every((i: any) => i.commission === 0)).toBe(true);
+    expect(transactions.create).not.toHaveBeenCalled();
+  });
+
+  it('allocates by quantity when no line has a retail value', async () => {
+    const { service } = campaignSetup(
+      kitSale({ kitPrice: 100, products: [{ productId: P3, quantity: 3 }] }),
+    );
+    const order: any = await service.create(claim([line(P3, 1, 'S'), line(P3, 2, 'M')]), {
+      trusted: true,
+    });
+    // 33.33 + 2 × 33.33 leaves a paisa; it lands on the single-unit line.
+    expect(order.items.map((i: any) => i.retailPrice)).toEqual([33.34, 33.33]);
+    expect(sum(order.items.map((i: any) => i.retailPrice * i.quantity))).toBe(100);
+    expect(order.totalCommission).toBe(70);
+    expect(sum(order.items.map((i: any) => i.commission))).toBe(70);
+  });
+
+  it('prices line by line, as before, when no kit price resolves', async () => {
+    const { service } = campaignSetup(kitSale());
+    const order: any = await service.create(claim([line(P1, 2), line(P2, 1)]), {
+      trusted: true,
+    });
+    expect(order.totalAmount).toBe(720);
+    expect(order.totalCommission).toBe(470);
   });
 });

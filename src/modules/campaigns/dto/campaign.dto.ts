@@ -4,13 +4,16 @@ import {
   ArrayMinSize,
   IsArray,
   IsEnum,
+  IsInt,
   IsMongoId,
   IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import {
@@ -29,6 +32,14 @@ export class CampaignProductDto {
   @IsNumber()
   @Min(0)
   retailPrice?: number;
+
+  // Accepted so a form can echo a line back, but not used: a campaign that
+  // isn't linked to a kit always takes 1 of each product per claim.
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  quantity?: number;
 }
 
 /**
@@ -63,6 +74,14 @@ class CampaignFieldsDto {
   @IsString()
   @MaxLength(600)
   successMessage?: string;
+
+  // Per-campaign override of the linked kit's price (INR, 2 dp at most);
+  // null = follow the kit. Refused without a kit; the production-cost floor is
+  // checked in the service.
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2, allowNaN: false, allowInfinity: false })
+  @Min(0)
+  kitPrice?: number | null;
 }
 
 export class CreateCampaignDto extends CampaignFieldsDto {
@@ -86,12 +105,20 @@ export class CreateCampaignDto extends CampaignFieldsDto {
   @MaxLength(120)
   slug: string;
 
+  // Links the campaign to a tribe kit: its products then come from the kit
+  // and any `products` sent are ignored.
+  @IsOptional()
+  @IsMongoId()
+  kitId?: string | null;
+
+  // Required unless a kit is linked (then ignored, so not validated either).
+  @ValidateIf((o) => !o.kitId)
   @IsArray()
   @ArrayMinSize(1)
   @ArrayMaxSize(100)
   @ValidateNested({ each: true })
   @Type(() => CampaignProductDto)
-  products: CampaignProductDto[];
+  products?: CampaignProductDto[];
 }
 
 export class UpdateCampaignDto extends CampaignFieldsDto {
@@ -116,6 +143,14 @@ export class UpdateCampaignDto extends CampaignFieldsDto {
   @MaxLength(120)
   slug?: string;
 
+  // A kit id links (or re-links) the campaign; null unlinks it, after which
+  // products come from the body again. Omitted = unchanged.
+  @IsOptional()
+  @IsMongoId()
+  kitId?: string | null;
+
+  // Ignored while the campaign is linked to a kit (so not validated either).
+  @ValidateIf((o) => !o.kitId)
   @IsOptional()
   @IsArray()
   @ArrayMinSize(1)

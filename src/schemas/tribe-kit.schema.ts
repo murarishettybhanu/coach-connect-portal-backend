@@ -29,6 +29,12 @@ export class TribeKit extends Document {
   })
   items: { productId: MongooseSchema.Types.ObjectId; quantity: number }[];
 
+  // Optional custom price (INR). null = the sum of the products' retail
+  // prices × quantities. Never below the kit's production cost (enforced in
+  // TribeKitsService). Linked campaigns follow it unless they override it.
+  @Prop({ type: Number, default: null })
+  kitPrice: number | null;
+
   @Prop({ default: true })
   isActive: boolean;
 

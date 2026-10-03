@@ -166,8 +166,12 @@ Operational notes:
   `sizeOptions` for the sizes a customer chooses from (empty = the standard XS–XXL),
   `disabledSizes` (off sale) and `sizeStock` (per-size quantities) — see "Stock" below.
   `name`, `baseProductionCost`, `retailPrice`, `sku` (unique), `stockLevel`, `imageUrl`, `isActive`.
+- **TribeKit** — owned by a Coach. `name`, `items[]` (productId + `quantity`),
+  optional `kitPrice` (null = Σ retail × qty), `isActive`, soft `isDeleted`.
 - **Campaign** — owned by a Coach. `type` (`WELCOME_KIT | STORE_SALE`),
-  `products[]` (productId + optional `retailPrice` for store sales), unique `slug`
+  `products[]` (productId, optional `retailPrice` for store sales, `quantity`
+  units per claim — absent on legacy lines, read as 1), optional `kitId` (linked
+  TribeKit) + `kitPrice` (override; null = follow the kit), unique `slug`
   (public URL), `status` (`ACTIVE | PAUSED | STOPPED`), `claims` counter.
 - **Order** — owned by a Coach, optional `campaignId`. `type` (`WELCOME_KIT | STORE_SALE`),
   `status` (`NEW → PACKED → DISPATCHED → DELIVERED`, or `CANCELLED`),
@@ -210,6 +214,20 @@ This is where the money math lives; touch carefully.
   `commission = (retailPrice - baseProductionCost) * quantity` **for STORE_SALE only**,
   accumulates `totalAmount` / `totalCost` / `totalCommission`, and **decrements
   product stock**. Increments `campaign.claims` if `campaignId` present.
+- **Campaign orders take exactly the campaign's contents** (public claims *and*
+  signed-in CSV imports): per campaign product, the order's lines — several when
+  units differ in size/name/photo — must sum to the product's campaign `quantity`
+  (legacy lines = 1), every product must be there and nothing else, or 400
+  `Quantities don't match this campaign`. Only a product deleted since the
+  campaign was made may be left out (the claim form no longer shows it).
+- **Kit-priced store sales**: a kit-linked STORE_SALE campaign whose price
+  resolves (`campaign.kitPrice ?? kit.kitPrice`) charges that price P for the
+  claim: `totalAmount = P`, `totalCommission = max(0, P − Σ cost × qty)`. Both
+  are spread over the lines by retail value (product retailPrice × qty; by
+  quantity if that's all zero) in whole paise (`common/kit-pricing.ts`):
+  commissions sum exactly; per-unit `retailPrice`s sum exactly whenever some
+  line can absorb the leftover paise evenly (always when a line has one unit).
+  No resolved price → lines are priced one by one as before.
 - **WELCOME_KIT** orders start with `approvalStatus = PENDING` and record **no**
   commission transaction until approved.
 - **STORE_SALE** orders record a `COMMISSION` transaction immediately (if commission > 0).
@@ -257,9 +275,34 @@ it, for products that existed before this was built). Rules worth knowing:
   npx jest size-stock`) and is skipped without it — the logic lives in the
   atomic updates, so a mocked model would prove nothing.
 
-Known gaps: a claim always takes **one** of each campaign product (the claim form
-sends `quantity: 1`), so a kit defined with 2 of a product ships 1 and asks for
-one size. Tribe-kit "buildable" counts use the product total, not sizes.
+Known gaps: tribe-kit "buildable" counts use the product total, not sizes.
+
+## Key business logic — Kits & kit-linked campaigns
+
+(`tribe-kits.service.ts`, `campaigns.service.ts`, `common/kit-pricing.ts`.)
+Applies to campaigns created from a kit; older campaigns are untouched.
+- **Price floor** = Σ product `baseProductionCost` × quantity. A kit's own
+  `kitPrice` below it is a 400 `Kit price can't be below the production cost of
+  its products (₹X)`; so is a campaign whose effective price is, when it links
+  or changes its price (not on every edit — pausing/stopping always works).
+- **Linking** (`kitId` on campaign create/update): the kit must be the tribe's
+  own and active; products are copied from the kit with quantities and current
+  retail prices, and any `products` in the body are **ignored**. The form
+  re-sends `kitId` on every save — an existing link tolerates a kit deactivated
+  since (and a deleted one while the campaign stays STOPPED). `kitId: null`
+  unlinks (price cleared; products from the body, else the old lines, at 1 each).
+  `kitPrice` without a kit is a 400.
+- **Live sync**: every kit PATCH rewrites `products` on all campaigns with its
+  `kitId`. Refused with 409 if a linked campaign's override would sit below the
+  new floor (names listed). Kit saved first, then campaigns (no transactions —
+  dev is a standalone mongod); the sync is idempotent, so re-saving repairs it.
+- **Deactivate / delete** a kit → 409 while a linked campaign isn't STOPPED.
+- **Responses**: every campaign carries `products[].quantity`, `kitId` as
+  `{ _id, name, kitPrice }`, `effectivePrice` (null unless linked and priced).
+  Signed-in reads (`GET /`, `/me`, create/update results) add `kitMinPrice`.
+  The public ones (`/slug/:slug`, `/:id`) never load production cost — the kit
+  populate there selects only name and price. Kit lists add `productValue`,
+  `minPrice` and `linkedCampaigns` (not STOPPED).
 
 ### Wallet balance (`transactions.service.ts`)
 `getBalance` = sum of COMMISSION amounts minus PAYOUT/DEBIT amounts (computed from
@@ -275,7 +318,11 @@ the ledger, not read off `coach.walletBalance` — the schema field is not the s
   Admin: `GET /products/sized`, `PATCH /:id/size-stock`, `PATCH /:id/inventory/add|remove`
   (optional `size`), `GET /:id/inventory/logs`.
 - **campaigns**: `GET /me` (coach), `POST /` (coach/admin), `GET /` (admin),
-  `GET /slug/:slug` (public), `GET /:id`, `PATCH /:id` (coach/admin)
+  `GET /slug/:slug` (public), `GET /:id` (public), `PATCH /:id` (coach/admin).
+  Create/update take `kitId?` / `kitPrice?` (see Kits above)
+- **tribe-kits**: `GET /?coachId=` (admin; a tribe always gets its own),
+  `POST /`, `PATCH /:id`, `DELETE /:id` (admin only; validated DTOs,
+  `kitPrice?: number | null`)
 - **orders**: `GET /me` & `GET /coach` (coach), `GET /pending-approvals` (admin/coach),
   `POST /` (public checkout), `GET /` (admin), `GET /:id`, `PATCH /:id/status` (admin),
   `PATCH /:id/approve` & `PATCH /:id/reject` (admin/coach)

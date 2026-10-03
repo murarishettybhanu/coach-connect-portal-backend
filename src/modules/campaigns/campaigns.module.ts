@@ -4,6 +4,7 @@ import { CampaignsService } from './campaigns.service';
 import { CampaignsController } from './campaigns.controller';
 import { Campaign, CampaignSchema } from '../../schemas/campaign.schema';
 import { Product, ProductSchema } from '../../schemas/product.schema';
+import { TribeKit, TribeKitSchema } from '../../schemas/tribe-kit.schema';
 import { TribesModule } from '../tribes/tribes.module';
 
 @Module({
@@ -12,6 +13,8 @@ import { TribesModule } from '../tribes/tribes.module';
       { name: Campaign.name, schema: CampaignSchema },
       // Read-only: campaign products must belong to the campaign's tribe.
       { name: Product.name, schema: ProductSchema },
+      // Read-only: kit-linked campaigns take products and price from the kit.
+      { name: TribeKit.name, schema: TribeKitSchema },
     ]),
     TribesModule,
   ],

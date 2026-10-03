@@ -19,8 +19,9 @@ import {
 import { Type } from 'class-transformer';
 import { OrderType } from '../../../schemas/order.schema';
 
-// Sanity caps for a public endpoint. A claim is one of each kit product and a
-// storefront basket is a handful of lines; nothing legitimate comes near these.
+// Sanity caps for a public endpoint. A claim takes exactly its campaign's
+// quantities (checked in OrdersService.create) and a storefront basket is a
+// handful of lines; nothing legitimate comes near these.
 export const MAX_ORDER_ITEMS = 50;
 export const MAX_ITEM_QUANTITY = 100;
 

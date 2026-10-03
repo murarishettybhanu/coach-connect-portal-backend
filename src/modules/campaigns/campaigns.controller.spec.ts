@@ -133,4 +133,38 @@ describe('Campaign DTOs', () => {
       [],
     );
   });
+
+  it('kit fields: products optional with a kit, kitPrice 2 dp at most, null allowed', async () => {
+    const { products, ...noProducts } = body;
+    expect(products).toBeDefined();
+    expect(await errorsFor(CreateCampaignDto, noProducts)).not.toEqual([]);
+    expect(
+      await errorsFor(CreateCampaignDto, {
+        ...noProducts,
+        kitId: PRODUCT,
+        kitPrice: 499.5,
+      }),
+    ).toEqual([]);
+    expect(
+      (
+        await errorsFor(CreateCampaignDto, {
+          ...noProducts,
+          kitId: PRODUCT,
+          kitPrice: 1.234,
+        })
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(
+      await errorsFor(UpdateCampaignDto, { kitId: null, kitPrice: null }),
+    ).toEqual([]);
+    expect(
+      (await errorsFor(UpdateCampaignDto, { kitId: 'nope' })).length,
+    ).toBeGreaterThan(0);
+    // A form may echo a line's quantity back.
+    expect(
+      await errorsFor(UpdateCampaignDto, {
+        products: [{ productId: PRODUCT, quantity: 2 }],
+      }),
+    ).toEqual([]);
+  });
 });
