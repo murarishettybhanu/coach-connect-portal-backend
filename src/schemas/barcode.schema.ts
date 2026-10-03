@@ -52,5 +52,18 @@ BarcodeSchema.index({
   manuallyUsedAt: 1,
   createdAt: 1,
 });
-BarcodeSchema.index({ assignedOrderId: 1 });
+// At most one barcode per order, enforced by the database rather than by a
+// read-then-claim in the service (which two concurrent packs could both pass).
+// Partial, so the many unassigned barcodes (null) don't collide. Named apart
+// from the old non-unique `assignedOrderId_1`, which can be dropped once this
+// one has built. Building it fails if any order already holds two barcodes —
+// release the extras first.
+BarcodeSchema.index(
+  { assignedOrderId: 1 },
+  {
+    name: 'assignedOrderId_unique',
+    unique: true,
+    partialFilterExpression: { assignedOrderId: { $type: 'objectId' } },
+  },
+);
 // `code` is already uniquely indexed via @Prop({ unique: true }).

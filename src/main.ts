@@ -1,42 +1,23 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
-import helmet from 'helmet';
 import { AppModule } from './app.module';
-import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+import { assertRequiredEnv, configureApp } from './app.setup';
 
 async function bootstrap() {
+  // ConfigModule loads `.env` while AppModule is imported; wait for it so the
+  // check below sees the same variables the app will.
+  await ConfigModule.envVariablesLoaded;
+  assertRequiredEnv();
+
   // `rawBody` keeps the untouched request bytes around (as `req.rawBody`) so the
   // WhatsApp webhook can verify Meta's X-Hub-Signature-256 HMAC, which is
   // computed over the exact payload — re-serialized JSON would not match.
   const app = await NestFactory.create(AppModule, { rawBody: true });
   const isProd = process.env.NODE_ENV === 'production';
 
-  // Trust the single reverse proxy (Caddy) so req.ip reflects the real client
-  // IP from X-Forwarded-For — required for correct per-IP rate limiting.
-  app.getHttpAdapter().getInstance().set('trust proxy', 1);
-
-  // Security headers.
-  app.use(helmet());
-
-  app.setGlobalPrefix('api');
-  app.useGlobalFilters(new AllExceptionsFilter());
-  app.useGlobalPipes(new ValidationPipe({
-    whitelist: true,
-    forbidNonWhitelisted: true,
-    transform: true,
-  }));
-
-  // Lock CORS to configured frontend origins in production; open in dev so
-  // localhost / LAN dev servers work without per-machine CORS config.
-  const origins = (process.env.CORS_ORIGINS || process.env.FRONTEND_URL || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  app.enableCors({
-    origin: isProd && origins.length ? origins : true,
-    credentials: true,
-  });
+  configureApp(app);
 
   // Swagger docs — never expose the full API surface in production.
   if (!isProd) {
@@ -52,4 +33,13 @@ async function bootstrap() {
 
   await app.listen(process.env.PORT || 3000);
 }
-bootstrap();
+
+bootstrap().catch((err: Error) => {
+  // A half-started server is worse than none: the deploy's health gate should
+  // see the container exit and roll back.
+  new Logger('Bootstrap').error(
+    `Startup failed: ${err?.message ?? err}`,
+    err?.stack,
+  );
+  process.exit(1);
+});

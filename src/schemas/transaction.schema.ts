@@ -33,4 +33,12 @@ export class Transaction extends Document {
 
 export const TransactionSchema = SchemaFactory.createForClass(Transaction);
 
+// Also serves coachId-only lookups (balance, ledger) as its prefix.
 TransactionSchema.index({ coachId: 1, createdAt: -1 });
+TransactionSchema.index({ orderId: 1 });
+// A bank transfer is recorded once: re-submitting the same UTR is refused.
+// Partial rather than sparse so legacy blank/absent UTRs don't collide.
+TransactionSchema.index(
+  { utrReference: 1 },
+  { unique: true, partialFilterExpression: { utrReference: { $gt: '' } } },
+);

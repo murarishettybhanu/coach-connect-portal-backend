@@ -1,36 +1,53 @@
-import { IsEmail, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import {
+  IsEmail,
+  IsEnum,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
+import { EnquiryStatus } from '../../../schemas/enquiry.schema';
 
+// Public form — every field is capped so an anonymous caller can't park
+// megabytes of text in the admin inbox.
 export class CreateEnquiryDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(120)
   name: string;
 
   @IsEmail()
+  @MaxLength(254)
   email: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(160)
   company?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(32)
   phone?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(200)
   interest?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   timeline?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(4000)
   message?: string;
 }
 
 export class UpdateEnquiryDto {
   @IsOptional()
-  @IsString()
-  status?: string;
+  @IsEnum(EnquiryStatus)
+  status?: EnquiryStatus;
 }

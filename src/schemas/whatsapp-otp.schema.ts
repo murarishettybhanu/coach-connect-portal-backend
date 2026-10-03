@@ -26,6 +26,11 @@ export class WhatsappOtp extends Document {
   @Prop({ required: true })
   lastSentAt: Date;
 
+  // When codes went out over the last day, newest last — drives the rolling
+  // hourly/daily caps. Pruned on every send, so it never grows past the cap.
+  @Prop({ type: [Date], default: [] })
+  sendLog: Date[];
+
   // Set when the code was entered correctly; how long that stays good is
   // decided by the order flow, not here.
   @Prop()

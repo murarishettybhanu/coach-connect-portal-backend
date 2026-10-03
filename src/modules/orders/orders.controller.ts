@@ -10,21 +10,26 @@ import {
   Delete,
   UseGuards,
   Request,
-  ForbiddenException,
   BadRequestException,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { BarcodeType } from '../../schemas/barcode.schema';
 import { JwtService } from '@nestjs/jwt';
+import { isValidObjectId } from 'mongoose';
 import { OrdersService } from './orders.service';
 import { TribesService } from '../tribes/tribes.service';
+import { UsersService } from '../users/users.service';
+import { isLoginTokenPayload } from '../auth/token-claims';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../schemas/user.schema';
 import { Throttle } from '@nestjs/throttler';
-import { OrderStatus } from '../../schemas/order.schema';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { UpdateOrderStatusDto } from './dto/update-status.dto';
+import { DownloadMediaDto } from './dto/download-media.dto';
+import { CurrentUserId } from '../../common/decorators/current-user.decorator';
+import { assertOwnedBy } from '../../common/utils/ownership';
 import { AttachAddressDto, UpdateAddressDto } from './dto/attach-address.dto';
 import { MarkReturnedDto } from './dto/mark-returned.dto';
 import { ReorderDto } from './dto/reorder.dto';
@@ -34,69 +39,109 @@ export class OrdersController {
   constructor(
     private readonly ordersService: OrdersService,
     private readonly tribesService: TribesService,
+    private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
   ) {}
 
   /**
-   * The two public write routes below are also used by signed-in staff. A valid
-   * session exempts the caller from the WhatsApp verification a public
-   * submission needs; a missing or invalid token just means "not trusted".
+   * The two public write routes below are also used by signed-in staff, who
+   * are exempt from the WhatsApp verification and postal checks a public
+   * submission needs (the admin CSV importer depends on it).
+   *
+   * A token that merely verifies is not enough — the OTP proof token is signed
+   * with the same secret. Trusted means: a real session for a user that still
+   * exists, who is an ADMIN, or the TRIBE that owns the campaign being
+   * submitted against. Anything else is just "not trusted".
    */
-  private isSignedIn(req: { headers?: { authorization?: string } }): boolean {
+  private async isTrustedCaller(
+    req: { headers?: { authorization?: string } },
+    campaignId?: string,
+  ): Promise<boolean> {
     const header = req.headers?.authorization;
     if (!header?.startsWith('Bearer ')) return false;
+    let payload: any;
     try {
-      this.jwtService.verify(header.slice('Bearer '.length));
-      return true;
+      payload = this.jwtService.verify(header.slice('Bearer '.length));
+    } catch {
+      return false;
+    }
+    // Same rules as JwtStrategy: a login token (not an OTP proof), for a user
+    // that still exists, issued since their last password change.
+    if (!isLoginTokenPayload(payload) || !isValidObjectId(payload.sub)) return false;
+
+    const user = await this.usersService.findOneById(String(payload.sub));
+    if (!user) return false;
+    if ((payload.tv ?? 0) !== ((user as any).tokenVersion ?? 0)) return false;
+    if (user.role === UserRole.ADMIN) return true;
+    if (user.role !== UserRole.TRIBE || !campaignId) return false;
+    try {
+      const tribeId = await this.tribesService.findIdByUserId(String(user._id));
+      return await this.ordersService.isCampaignOwnedBy(campaignId, tribeId);
     } catch {
       return false;
     }
   }
 
+  /**
+   * Object-level authorization for every order route a TRIBE can reach: an
+   * admin passes, a tribe only for its own orders. Returns the order.
+   */
+  private async assertOrderOwnership(id: string, req: any, userId: string) {
+    const order = await this.ordersService.findOne(id);
+    if (req.user.role !== UserRole.ADMIN) {
+      const tribeId = await this.tribesService.findIdByUserId(userId);
+      assertOwnedBy((order as any).coachId, tribeId, 'Not authorized to access this order');
+    }
+    return order;
+  }
+
   @Get('me')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.TRIBE)
-  async findMyOrders(@Request() req) {
-    const coach = await this.tribesService.findByUserId(req.user.userId || req.user.sub || req.user._id);
-    return this.ordersService.findByCoach(coach._id);
+  async findMyOrders(@CurrentUserId() userId: string) {
+    const tribeId = await this.tribesService.findIdByUserId(userId);
+    return this.ordersService.findByCoach(tribeId);
   }
 
   @Get('pending-approvals')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.TRIBE)
-  async findPendingApprovals(@Request() req) {
+  async findPendingApprovals(@Request() req, @CurrentUserId() userId: string) {
     if (req.user.role === UserRole.TRIBE) {
-      const coach = await this.tribesService.findByUserId(req.user.userId || req.user.sub || req.user._id);
-      return this.ordersService.findPendingApprovals(coach._id);
+      const tribeId = await this.tribesService.findIdByUserId(userId);
+      return this.ordersService.findPendingApprovals(tribeId);
     }
     return this.ordersService.findPendingApprovals();
   }
 
   @Post()
-  create(@Body() orderData: CreateOrderDto, @Request() req) {
-    return this.ordersService.create(orderData, { trusted: this.isSignedIn(req) });
+  async create(@Body() orderData: CreateOrderDto, @Request() req) {
+    const trusted = await this.isTrustedCaller(req, orderData.campaignId);
+    return this.ordersService.create(orderData, { trusted });
   }
 
   // Public: step-2 lookup — does an address-pending claim exist for this phone?
+  // `fullName` comes back only with a WhatsApp proof token for that phone.
   @Get('pending-claim')
   @Throttle({ default: { limit: 20, ttl: 60000 } })
   findPendingClaim(
     @Query('campaignId') campaignId: string,
     @Query('phone') phone: string,
+    @Query('otpToken') otpToken?: string,
   ) {
-    return this.ordersService.findPendingClaim(campaignId, phone);
+    return this.ordersService.findPendingClaim(campaignId, phone, otpToken);
   }
 
   // Public: attach a delivery address to address-pending claim(s) by campaign + phone.
   @Post('attach-address')
   @Throttle({ default: { limit: 15, ttl: 60000 } })
-  attachAddress(@Body() dto: AttachAddressDto, @Request() req) {
+  async attachAddress(@Body() dto: AttachAddressDto, @Request() req) {
     return this.ordersService.attachAddressByPhone(
       dto.campaignId,
       dto.phone,
       dto.address,
       {
-        trusted: this.isSignedIn(req),
+        trusted: await this.isTrustedCaller(req, dto.campaignId),
         otpToken: dto.otpToken,
         termsAccepted: dto.termsAccepted,
       },
@@ -107,8 +152,8 @@ export class OrdersController {
   @Post('media/download')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
-  async downloadMedia(@Body('orderIds') orderIds: string[], @Res() res: Response) {
-    await this.ordersService.streamMediaZip(orderIds || [], res);
+  async downloadMedia(@Body() dto: DownloadMediaDto, @Res() res: Response) {
+    await this.ordersService.streamMediaZip(dto.orderIds || [], res);
   }
 
   // Admin: list soft-deleted orders (optionally scoped to a tribe).
@@ -178,13 +223,11 @@ export class OrdersController {
   async findAddressPending(
     @Query('campaignId') campaignId: string,
     @Request() req,
+    @CurrentUserId() userId: string,
   ) {
     let coachId: string | undefined;
     if (req.user.role !== UserRole.ADMIN) {
-      const coach = await this.tribesService.findByUserId(
-        req.user.userId || req.user.sub || req.user._id,
-      );
-      coachId = String(coach._id);
+      coachId = await this.tribesService.findIdByUserId(userId);
     }
     return this.ordersService.findAddressPending(campaignId, coachId);
   }
@@ -204,7 +247,7 @@ export class OrdersController {
     @Query('limit') limit?: string,
     @Query('search') search?: string,
     @Query('status') status?: string,
-    @Query('coachId') coachId?: string,
+    @Query('coachId') coachId?: string | string[],
   ) {
     return this.ordersService.findAllPaginated({
       page: page ? Number(page) : undefined,
@@ -218,8 +261,8 @@ export class OrdersController {
   @Get('tribe')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.TRIBE)
-  findByCoach(@Request() req) {
-    return this.findMyOrders(req);
+  findByCoach(@CurrentUserId() userId: string) {
+    return this.findMyOrders(userId);
   }
 
   @Get('by-coach/:coachId')
@@ -243,34 +286,25 @@ export class OrdersController {
   @Get(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.TRIBE)
-  async findOne(@Param('id') id: string, @Request() req) {
-    const order = await this.ordersService.findOne(id);
+  async findOne(
+    @Param('id') id: string,
+    @Request() req,
+    @CurrentUserId() userId: string,
+  ) {
     // Object-level authorization: a tribe may only read its own orders.
-    if (req.user.role !== UserRole.ADMIN) {
-      const coach = await this.tribesService.findByUserId(
-        req.user.userId || req.user.sub || req.user._id,
-      );
-      const orderCoachId = String((order as any).coachId?._id || (order as any).coachId);
-      if (orderCoachId !== String(coach._id)) {
-        throw new ForbiddenException('Not authorized to view this order');
-      }
-    }
-    return order;
+    return this.assertOrderOwnership(id, req, userId);
   }
 
   @Patch(':id/status')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
-  updateStatus(
-    @Param('id') id: string,
-    @Body('status') status: OrderStatus,
-    @Body('trackingNumber') trackingNumber?: string,
-    @Body('deliveryType') deliveryType?: BarcodeType,
-  ) {
-    if (deliveryType && !Object.values(BarcodeType).includes(deliveryType)) {
-      throw new BadRequestException('Invalid delivery type');
-    }
-    return this.ordersService.updateStatus(id, status, trackingNumber, deliveryType);
+  updateStatus(@Param('id') id: string, @Body() dto: UpdateOrderStatusDto) {
+    return this.ordersService.updateStatus(
+      id,
+      dto.status,
+      dto.trackingNumber,
+      dto.deliveryType,
+    );
   }
 
   @Patch(':id/approve')
@@ -281,10 +315,10 @@ export class OrdersController {
     @Body('note') note: string,
     @Body('selectedItemIds') selectedItemIds: string[],
     @Request() req,
+    @CurrentUserId() userId: string,
   ) {
-    const approvedBy = req.user.role === UserRole.ADMIN
-      ? 'admin'
-      : (req.user.userId || req.user.sub || req.user._id);
+    await this.assertOrderOwnership(id, req, userId);
+    const approvedBy = req.user.role === UserRole.ADMIN ? 'admin' : userId;
     return this.ordersService.approveOrder(id, approvedBy, note, selectedItemIds);
   }
 
@@ -295,10 +329,10 @@ export class OrdersController {
     @Param('id') id: string,
     @Body('note') note: string,
     @Request() req,
+    @CurrentUserId() userId: string,
   ) {
-    const rejectedBy = req.user.role === UserRole.ADMIN
-      ? 'admin'
-      : (req.user.userId || req.user.sub || req.user._id);
+    await this.assertOrderOwnership(id, req, userId);
+    const rejectedBy = req.user.role === UserRole.ADMIN ? 'admin' : userId;
     return this.ordersService.rejectOrder(id, rejectedBy, note);
   }
 
@@ -310,18 +344,10 @@ export class OrdersController {
     @Param('id') id: string,
     @Body() address: UpdateAddressDto,
     @Request() req,
+    @CurrentUserId() userId: string,
   ) {
     // Object-level authorization: a tribe may only update its own orders.
-    if (req.user.role !== UserRole.ADMIN) {
-      const order = await this.ordersService.findOne(id);
-      const coach = await this.tribesService.findByUserId(
-        req.user.userId || req.user.sub || req.user._id,
-      );
-      const orderCoachId = String((order as any).coachId?._id || (order as any).coachId);
-      if (orderCoachId !== String(coach._id)) {
-        throw new ForbiddenException('Not authorized to update this order');
-      }
-    }
+    await this.assertOrderOwnership(id, req, userId);
     return this.ordersService.updateAddress(id, address);
   }
 
@@ -338,9 +364,8 @@ export class OrdersController {
   @Patch(':id/revert-status')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
-  revertStatus(@Param('id') id: string, @Request() req) {
-    const userId = req.user?.userId || req.user?.sub || req.user?._id;
-    return this.ordersService.revertStatus(id, userId ? String(userId) : undefined);
+  revertStatus(@Param('id') id: string, @CurrentUserId() userId: string) {
+    return this.ordersService.revertStatus(id, userId || undefined);
   }
 
   // Admin: restore a soft-deleted order.

@@ -1,22 +1,26 @@
-import { Controller, Post, Patch, Body, HttpCode, HttpStatus, UseGuards, Request } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Patch,
+  Body,
+  HttpCode,
+  HttpStatus,
+  UseGuards,
+  Request,
+} from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
-import { RegisterDto } from './dto/register.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
+// No public registration: every account (tribes, admins) is provisioned
+// through the admin-guarded flows.
 @Controller('auth')
 export class AuthController {
   constructor(private authService: AuthService) {}
 
   // Tighter limit than the global default to blunt credential-stuffing.
-  @Throttle({ default: { limit: 8, ttl: 60_000 } })
-  @Post('register')
-  async register(@Body() registerDto: RegisterDto) {
-    return this.authService.register(registerDto);
-  }
-
   @Throttle({ default: { limit: 8, ttl: 60_000 } })
   @Post('login')
   @HttpCode(HttpStatus.OK)
@@ -29,6 +33,10 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   async changePassword(@Body() dto: ChangePasswordDto, @Request() req) {
     const userId = (req.user._id || req.user.id || req.user.sub).toString();
-    return this.authService.changePassword(userId, dto.currentPassword, dto.newPassword);
+    return this.authService.changePassword(
+      userId,
+      dto.currentPassword,
+      dto.newPassword,
+    );
   }
 }

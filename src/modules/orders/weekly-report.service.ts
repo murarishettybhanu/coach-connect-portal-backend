@@ -4,6 +4,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Order, OrderStatus } from '../../schemas/order.schema';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
+import { JobRun, claimJobWindow } from './job-run.schema';
 import { titleCaseName } from '../../common/utils/name.util';
 
 /** Meta template `weekly_dispatch_report`. */
@@ -71,11 +72,21 @@ export class WeeklyReportService {
   constructor(
     @InjectModel(Order.name) private readonly orderModel: Model<Order>,
     private readonly whatsapp: WhatsappService,
+    @InjectModel(JobRun.name)
+    private readonly jobRunModel?: Model<JobRun>,
   ) {}
 
   @Cron('0 18 * * 5', { name: 'weekly-report', timeZone: TIMEZONE })
   async runWeekly(): Promise<void> {
     const { start, end } = this.weeklyWindowEndingAt(new Date());
+    // Once per window: a second firing (another replica, a restart at the
+    // cut-off) finds the window already claimed and sends nothing.
+    if (!(await claimJobWindow(this.jobRunModel, 'weekly-report', start, end))) {
+      this.logger.warn(
+        `weekly-report for the window ending ${end.toISOString()} already ran — skipping`,
+      );
+      return;
+    }
     await this.run(start, end);
   }
 

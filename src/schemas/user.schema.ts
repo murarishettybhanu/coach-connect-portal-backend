@@ -23,6 +23,11 @@ export class User extends Document {
 
   @Prop()
   phoneNumber?: string;
+
+  // Stamped into every login token and checked on each request. Bumping it
+  // (password change or reset) signs out every session issued before.
+  @Prop({ default: 0 })
+  tokenVersion: number;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

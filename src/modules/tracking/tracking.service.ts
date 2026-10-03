@@ -1,4 +1,9 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Order } from '../../schemas/order.schema';
+import { Tribe } from '../../schemas/tribe.schema';
+import { UserRole } from '../../schemas/user.schema';
 import {
   IndiaPostApiService,
   IndiaPostArticle,
@@ -50,6 +55,12 @@ export interface TrackingResult {
 const ARTICLE_NUMBER_RE = /^[A-Z]{2}\d{9}[A-Z]{2}$/;
 const SOURCE = 'India Post';
 
+/** The caller, as JwtStrategy puts it on the request. */
+export interface TrackingCaller {
+  _id: unknown;
+  role: UserRole | string;
+}
+
 /**
  * Consignment status from India Post's official Bulk Tracking API
  * (`POST /v1/tracking/bulk`), mapped onto our own shape.
@@ -64,12 +75,86 @@ const SOURCE = 'India Post';
 export class TrackingService {
   private readonly logger = new Logger(TrackingService.name);
 
-  constructor(private readonly indiaPost: IndiaPostApiService) {}
+  constructor(
+    private readonly indiaPost: IndiaPostApiService,
+    @InjectModel(Order.name) private readonly orderModel: Model<Order>,
+    @InjectModel(Tribe.name) private readonly tribeModel: Model<Tribe>,
+  ) {}
 
   async track(consignmentNumber: string): Promise<TrackingResult> {
     const number = this.normalize(consignmentNumber);
     const [result] = await this.trackMany([number]);
     return result;
+  }
+
+  /**
+   * `trackMany`, scoped to what the caller may see. Admins track anything; a
+   * tribe only numbers on its own orders. Anything else answers exactly like
+   * an article India Post doesn't know — never "forbidden" — so a tribe can't
+   * probe which numbers belong to someone else, and nothing it isn't owed is
+   * sent upstream at all.
+   */
+  async trackManyFor(
+    caller: TrackingCaller,
+    consignmentNumbers: string[],
+  ): Promise<TrackingResult[]> {
+    const numbers = consignmentNumbers.map((n) => this.normalize(n));
+    if (caller.role === UserRole.ADMIN) return this.trackMany(numbers);
+
+    const owned =
+      caller.role === UserRole.TRIBE
+        ? await this.ownedNumbers(caller._id, numbers)
+        : new Set<string>();
+    const allowed = numbers.filter((n) => owned.has(n));
+    const results = allowed.length ? await this.trackMany(allowed) : [];
+    const byNumber = new Map(results.map((r) => [r.consignmentNumber, r]));
+
+    return numbers.map((n) => byNumber.get(n) ?? this.map(n, undefined));
+  }
+
+  async trackFor(
+    caller: TrackingCaller,
+    consignmentNumber: string,
+  ): Promise<TrackingResult> {
+    const [result] = await this.trackManyFor(caller, [consignmentNumber]);
+    return result;
+  }
+
+  /** Which of `numbers` are tracking numbers on the caller's tribe's orders. */
+  private async ownedNumbers(
+    userId: unknown,
+    numbers: string[],
+  ): Promise<Set<string>> {
+    const tribe = await this.tribeModel
+      .findOne({ userId } as any)
+      .select('_id')
+      .lean()
+      .exec();
+    if (!tribe) return new Set();
+
+    // Tracking numbers are typed in by hand at dispatch as well as assigned
+    // from the barcode pool, so match without regard to case. The numbers are
+    // already validated as [A-Z0-9], so they are safe inside a pattern.
+    const orders = await this.orderModel
+      .find({
+        coachId: tribe._id,
+        trackingNumber: {
+          $in: [...new Set(numbers)].map(
+            (n) => new RegExp(`^\\s*${n}\\s*$`, 'i'),
+          ),
+        },
+      } as any)
+      .select('trackingNumber')
+      .lean()
+      .exec();
+
+    return new Set(
+      orders.map((o) =>
+        String(o.trackingNumber ?? '')
+          .trim()
+          .toUpperCase(),
+      ),
+    );
   }
 
   /**

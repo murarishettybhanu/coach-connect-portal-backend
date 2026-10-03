@@ -4,7 +4,6 @@ import {
   Post,
   Body,
   UseGuards,
-  Request,
 } from '@nestjs/common';
 import { TransactionsService } from './transactions.service';
 import { TribesService } from '../tribes/tribes.service';
@@ -13,6 +12,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../schemas/user.schema';
 import { CreatePayoutDto } from './dto/create-payout.dto';
+import { CurrentUserId } from '../../common/decorators/current-user.decorator';
 
 @Controller('transactions')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -24,16 +24,16 @@ export class TransactionsController {
 
   @Get('me')
   @Roles(UserRole.TRIBE)
-  async findMyTransactions(@Request() req) {
-    const coach = await this.tribesService.findByUserId(req.user.userId || req.user.sub || req.user._id);
-    return this.transactionsService.findByCoach(coach._id);
+  async findMyTransactions(@CurrentUserId() userId: string) {
+    const tribeId = await this.tribesService.findIdByUserId(userId);
+    return this.transactionsService.findByCoach(tribeId);
   }
 
   @Get('my-balance')
   @Roles(UserRole.TRIBE)
-  async getMyBalance(@Request() req) {
-    const coach = await this.tribesService.findByUserId(req.user.userId || req.user.sub || req.user._id);
-    const balance = await this.transactionsService.getBalance(coach._id);
+  async getMyBalance(@CurrentUserId() userId: string) {
+    const tribeId = await this.tribesService.findIdByUserId(userId);
+    const balance = await this.transactionsService.getBalance(tribeId);
     return { balance };
   }
 
@@ -51,13 +51,13 @@ export class TransactionsController {
 
   @Get('tribe')
   @Roles(UserRole.TRIBE)
-  findByCoach(@Request() req) {
-    return this.findMyTransactions(req);
+  findByCoach(@CurrentUserId() userId: string) {
+    return this.findMyTransactions(userId);
   }
 
   @Get('balance')
   @Roles(UserRole.TRIBE)
-  async getBalance(@Request() req) {
-    return this.getMyBalance(req);
+  async getBalance(@CurrentUserId() userId: string) {
+    return this.getMyBalance(userId);
   }
 }

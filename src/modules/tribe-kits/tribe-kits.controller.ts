@@ -16,6 +16,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../schemas/user.schema';
+import { CurrentUserId } from '../../common/decorators/current-user.decorator';
 
 // Tribe kits are authored by admin (in the coach detail page) and read by both
 // admin and the owning coach (for campaign selection).
@@ -35,13 +36,14 @@ export class TribeKitsController {
 
   @Get()
   @Roles(UserRole.ADMIN, UserRole.TRIBE)
-  async list(@Query('coachId') coachId: string, @Request() req: any) {
+  async list(
+    @Query('coachId') coachId: string,
+    @Request() req: any,
+    @CurrentUserId() userId: string,
+  ) {
     // A coach may only ever see their own kits, regardless of the query param.
     if (req.user.role === UserRole.TRIBE) {
-      const coach = await this.tribesService.findByUserId(
-        req.user.userId || req.user.sub || req.user._id,
-      );
-      return this.kits.findByCoach(coach._id);
+      return this.kits.findByCoach(await this.tribesService.findIdByUserId(userId));
     }
     return this.kits.findByCoach(coachId);
   }

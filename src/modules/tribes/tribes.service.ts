@@ -8,16 +8,36 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { Tribe } from '../../schemas/tribe.schema';
+import { User } from '../../schemas/user.schema';
 import { UsersService } from '../users/users.service';
 import { TransactionsService } from '../transactions/transactions.service';
 import { MailService } from '../mail/mail.service';
 import { UserRole } from '../../schemas/user.schema';
 import { generateStrongPassword } from '../../common/utils/password.util';
+import { UpdateTribeDto } from './dto/update-tribe.dto';
+
+// Tribe-document fields PATCH /tribes/:id may write (email/phone live on User).
+const TRIBE_FIELDS = [
+  'name',
+  'username',
+  'isActive',
+  'brand',
+  'tagline',
+  'bio',
+  'contactEmail',
+  'profileImage',
+  'logoUrl',
+  'socialLinks',
+  'bankingDetails',
+  'storefrontConfig',
+] as const;
 
 @Injectable()
 export class TribesService {
   constructor(
     @InjectModel(Tribe.name) private tribeModel: Model<Tribe>,
+    // Only to undo a half-finished onboarding; UsersService has no delete.
+    @InjectModel(User.name) private userModel: Model<User>,
     private usersService: UsersService,
     private transactionsService: TransactionsService,
     private mailService: MailService,
@@ -35,6 +55,15 @@ export class TribesService {
     const existingUser = await this.usersService.findOneByEmail(tribeData.email);
     if (existingUser) {
       throw new ConflictException('A user with this email already exists');
+    }
+    // Checked before the user is created, so the common failure leaves nothing
+    // behind. The unique index still decides a race — handled below.
+    if (!tribeData.username || (await this.tribeModel.exists({ username: tribeData.username } as any))) {
+      throw new ConflictException(
+        tribeData.username
+          ? 'A tribe with this username already exists'
+          : 'A username is required',
+      );
     }
 
     // Strong auto-generated password — emailed to the coach; they change it after first login.
@@ -58,7 +87,18 @@ export class TribesService {
       storefrontConfig: {},
       bankingDetails: {},
     });
-    const saved = await coach.save();
+    let saved: Tribe;
+    try {
+      saved = await coach.save();
+    } catch (err: any) {
+      // No transactions here (standalone mongod in dev), so compensate: a
+      // login without a tribe is an account that can sign in to nothing.
+      await this.userModel.deleteOne({ _id: user._id } as any).exec();
+      if (err?.code === 11000) {
+        throw new ConflictException('A tribe with this username already exists');
+      }
+      throw err;
+    }
 
     const emailSent = await this.mailService.sendTribeWelcome(
       tribeData.email,
@@ -77,11 +117,30 @@ export class TribesService {
 
   async findAll(): Promise<any[]> {
     const coaches = await this.tribeModel.find().populate('userId', '-password').exec();
-    return Promise.all(coaches.map(async (c) => {
-      const balance = await this.transactionsService.getBalance(c._id as any);
-      const coachObj = c.toObject();
-      return { ...coachObj, walletBalance: balance };
+    // One aggregation for every balance, not one ledger scan per tribe.
+    const balances = await this.transactionsService.getBalances(
+      coaches.map((c) => c._id),
+    );
+    return coaches.map((c) => ({
+      ...c.toObject(),
+      walletBalance: balances.get(String(c._id)) ?? 0,
     }));
+  }
+
+  /**
+   * The caller's tribe id, without the balance `findByUserId` computes. For
+   * ownership checks, which run on nearly every tribe request.
+   */
+  async findIdByUserId(userId: string): Promise<string> {
+    const tribe = await this.tribeModel
+      .findOne({ userId } as any)
+      .select('_id')
+      .lean()
+      .exec();
+    if (!tribe) {
+      throw new NotFoundException(`Tribe profile for user ${userId} not found`);
+    }
+    return String(tribe._id);
   }
 
   async findByUserId(userId: string): Promise<any> {
@@ -119,7 +178,9 @@ export class TribesService {
     return tribe;
   }
 
-  async update(id: string, tribeData: any): Promise<Tribe> {
+  // `tribeData` is an UpdateTribeDto already narrowed to what the caller may
+  // change. The update is an explicit $set of known fields, never the raw body.
+  async update(id: string, tribeData: UpdateTribeDto): Promise<Tribe> {
     const tribe = await this.tribeModel.findById(id).exec();
     if (!tribe) {
       throw new NotFoundException(`Tribe with ID ${id} not found`);
@@ -137,8 +198,12 @@ export class TribesService {
       await this.usersService.update(String(tribe.userId), userPatch);
     }
 
+    const $set: Record<string, unknown> = {};
+    for (const key of TRIBE_FIELDS) {
+      if ((tribeFields as any)[key] !== undefined) $set[key] = (tribeFields as any)[key];
+    }
     const updatedCoach = await this.tribeModel
-      .findByIdAndUpdate(id, tribeFields, { new: true })
+      .findByIdAndUpdate(id, { $set }, { new: true })
       .exec();
     return updatedCoach as Tribe;
   }

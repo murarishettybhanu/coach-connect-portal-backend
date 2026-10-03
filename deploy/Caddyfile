@@ -13,6 +13,12 @@
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
+		# TanStack's SPA shell hydrates through inline <script>s whose contents
+		# change every build, so scripts need 'unsafe-inline'; the policy still
+		# pins every script/style/font/API origin and blocks plugins, <base>
+		# hijacking and framing. Images allow any https host (product imageUrls
+		# are admin-entered); blob: covers the WhatsApp media viewer.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self' https://api.tribemerchandise.com https://api.tribemerchandise.in; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
 		-Server
 	}
 

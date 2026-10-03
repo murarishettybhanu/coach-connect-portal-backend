@@ -35,3 +35,6 @@ export class InventoryLog extends Document {
 }
 
 export const InventoryLogSchema = SchemaFactory.createForClass(InventoryLog);
+
+// A product's movement history, newest first (GET /products/:id/inventory/logs).
+InventoryLogSchema.index({ productId: 1, createdAt: -1 });

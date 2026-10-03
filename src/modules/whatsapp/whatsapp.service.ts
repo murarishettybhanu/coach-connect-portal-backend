@@ -8,7 +8,7 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { createHmac, timingSafeEqual } from 'crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
 import {
   WhatsappMessage,
   WhatsappDirection,
@@ -86,6 +86,15 @@ interface WhatsappInboundMessage {
 // anything but an approved template.
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
+// How long the template list is reused for sends. Templates change rarely and
+// only through the admin screen; a send for a name not in the cached list
+// refetches anyway, so a freshly approved template is never missed.
+const TEMPLATE_CACHE_MS = 5 * 60 * 1000;
+
+// What the inbox shows for an authentication template instead of its body —
+// the rendered body would contain the passcode itself.
+export const REDACTED_OTP_TEXT = 'Verification code sent';
+
 interface WhatsappMedia {
   id?: string;
   mime_type?: string;
@@ -118,6 +127,7 @@ interface WhatsappMedia {
 export class WhatsappService {
   private readonly logger = new Logger(WhatsappService.name);
   private readonly isProd = process.env.NODE_ENV === 'production';
+  private templateCache?: { at: number; templates: WhatsappTemplate[] };
 
   constructor(
     @InjectModel(WhatsappMessage.name)
@@ -138,7 +148,14 @@ export class WhatsappService {
       key: WHATSAPP_SETTINGS_KEY,
     });
     if (existing) return existing;
-    return this.settingModel.create({ key: WHATSAPP_SETTINGS_KEY });
+    // An upsert, not a create: two first reads at once (the webhook can be
+    // concurrent) would otherwise race into a duplicate-key error.
+    const created = await this.settingModel.findOneAndUpdate(
+      { key: WHATSAPP_SETTINGS_KEY },
+      { $setOnInsert: { key: WHATSAPP_SETTINGS_KEY } },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+    return created as WhatsappSetting;
   }
 
   async updateSettings(
@@ -430,18 +447,23 @@ export class WhatsappService {
   async sendTemplateTo(
     rawContact: string,
     input: SendTemplateInput,
+    // A caller that already holds the template (the OTP flow, sends by id)
+    // passes it in, saving a lookup — and the dependency on WHATSAPP_WABA_ID.
+    opts: { template?: WhatsappTemplate } = {},
   ): Promise<WhatsappMessage> {
     // A template can open a conversation with someone who has never written
     // in, so this is where numbers typed by hand first reach us.
     const contact = this.normalizeContact(rawContact);
     const now = new Date();
-    const template = await this.findTemplate(input);
-    const rendered = this.renderTemplate(input, template);
+    const template = opts.template ?? (await this.findTemplate(input));
+    const authentication =
+      input.authentication ?? template?.category === 'AUTHENTICATION';
+    const rendered = this.renderTemplate(input, template, authentication);
 
     try {
       const { waMessageId } = await this.api.sendTemplate(contact, {
         ...input,
-        authentication: template?.category === 'AUTHENTICATION',
+        authentication,
       });
 
       const [saved] = await Promise.all([
@@ -475,7 +497,7 @@ export class WhatsappService {
       return saved;
     } catch (err) {
       await this.messageModel.create({
-        waMessageId: `failed-${now.getTime()}-${contact}`,
+        waMessageId: this.failedMessageId(now, contact),
         direction: WhatsappDirection.OUTBOUND,
         contact,
         from: process.env.WHATSAPP_PHONE_NUMBER_ID ?? 'business',
@@ -485,7 +507,7 @@ export class WhatsappService {
         templateName: input.name,
         sentAt: now,
         sendStatus: WhatsappSendStatus.FAILED,
-        errorMessage: (err as Error).message,
+        errorMessage: this.failureReason(err),
         handled: true,
       });
       throw err;
@@ -501,11 +523,19 @@ export class WhatsappService {
   private async findTemplate(
     input: SendTemplateInput,
   ): Promise<WhatsappTemplate | undefined> {
-    try {
-      const templates = await this.api.listTemplates();
-      return templates.find(
+    const match = (templates: WhatsappTemplate[]) =>
+      templates.find(
         (t) => t.name === input.name && t.language === input.language,
       );
+    try {
+      const cache = this.templateCache;
+      if (cache && Date.now() - cache.at < TEMPLATE_CACHE_MS) {
+        const cached = match(cache.templates);
+        if (cached) return cached;
+      }
+      const templates = await this.api.listTemplates();
+      this.templateCache = { at: Date.now(), templates };
+      return match(templates);
     } catch (err) {
       this.logger.warn(
         `Could not look up template "${input.name}": ${(err as Error).message}`,
@@ -596,24 +626,27 @@ export class WhatsappService {
           ),
         };
 
-    return this.sendTemplateTo(contact, input);
+    // The template was just fetched by id — no need to look it up again.
+    return this.sendTemplateTo(contact, input, { template });
   }
 
-  /** Fills a template's body with the given parameters, for the thread view. */
+  /**
+   * Fills a template's body with the given parameters, for the thread view.
+   * Authentication templates are never rendered: their only parameter is the
+   * passcode, and the thread and inbox preview must not hold it in the clear.
+   */
   private renderTemplate(
     input: SendTemplateInput,
     template?: WhatsappTemplate,
+    authentication = false,
   ): string {
+    if (authentication) return REDACTED_OTP_TEXT;
+
     const body = (template?.components ?? []).find(
       (c) => (c as { type?: string }).type === 'BODY',
     ) as { text?: string } | undefined;
 
-    if (!body?.text) {
-      // Authentication bodies are generated by Meta and often come back empty.
-      return template?.category === 'AUTHENTICATION' && input.parameters?.[0]
-        ? `${input.parameters[0]} is your verification code.`
-        : `[template: ${input.name}]`;
-    }
+    if (!body?.text) return `[template: ${input.name}]`;
 
     return body.text.replace(/\{\{\s*([\w]+)\s*\}\}/g, (whole, key: string) => {
       if (/^\d+$/.test(key))
@@ -718,7 +751,15 @@ export class WhatsappService {
       { upsert: true },
     );
 
-    await this.sendAcknowledgementIfFirst(doc.contact);
+    // Not awaited: the acknowledgement is a Graph round trip, and Meta wants
+    // its 200 fast — a slow send would hold the whole batch and risk a retry.
+    // The message itself is already stored; the ack handles its own failures.
+    void this.sendAcknowledgementIfFirst(doc.contact).catch((err: Error) =>
+      this.logger.error(
+        `Acknowledgement to ${doc.contact} failed: ${err.message}`,
+        err.stack,
+      ),
+    );
   }
 
   /**
@@ -819,10 +860,9 @@ export class WhatsappService {
       ]);
       return saved;
     } catch (err) {
-      const reason = (err as Error).message;
+      const reason = this.failureReason(err);
       await this.messageModel.create({
-        // No wamid exists for a send Meta refused, so key the row locally.
-        waMessageId: `failed-${now.getTime()}-${to}`,
+        waMessageId: this.failedMessageId(now, to),
         direction: WhatsappDirection.OUTBOUND,
         contact: to,
         from: process.env.WHATSAPP_PHONE_NUMBER_ID ?? 'business',
@@ -837,6 +877,25 @@ export class WhatsappService {
       });
       throw err;
     }
+  }
+
+  /**
+   * No wamid exists for a send Meta refused, so the row is keyed locally. The
+   * random suffix matters: two failures to one number in the same millisecond
+   * (a bulk dispatch) would otherwise collide on the unique index.
+   */
+  private failedMessageId(now: Date, to: string): string {
+    return `failed-${now.getTime()}-${to}-${randomUUID()}`;
+  }
+
+  /**
+   * What to record on a failed row. The API client keeps Meta's own wording
+   * off the HTTP response but attaches it here, since the admin inbox is the
+   * one place it's useful.
+   */
+  private failureReason(err: unknown): string {
+    const e = err as { upstreamDetail?: string; message?: string };
+    return e?.upstreamDetail || e?.message || 'Send failed';
   }
 
   /** Best-effort readable body across the message types we care about. */

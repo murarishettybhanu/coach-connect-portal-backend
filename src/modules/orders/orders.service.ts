@@ -3,9 +3,10 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ConflictException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model, isValidObjectId } from 'mongoose';
+import { Model, Types, isValidObjectId } from 'mongoose';
 import type { Response } from 'express';
 import archiver = require('archiver');
 import { Order, OrderStatus, OrderType, ApprovalStatus } from '../../schemas/order.schema';
@@ -18,11 +19,45 @@ import { BarcodeType } from '../../schemas/barcode.schema';
 import { WhatsappOtpService } from '../whatsapp/whatsapp-otp.service';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
 import { titleCaseName } from '../../common/utils/name.util';
+import { isAllowedMediaUrl } from '../../common/utils/media-url';
+import { pageSizeOf } from '../../common/utils/pagination.util';
+import { MAX_MEDIA_ORDERS } from './dto/download-media.dto';
 
 // A rejected claim is dead: no dispatch, no commission. Order listings exclude
 // them so the tables only hold work that still matters. `$ne` also matches the
 // null/absent approvalStatus that store sales carry.
 const NOT_REJECTED = { approvalStatus: { $ne: ApprovalStatus.REJECTED } };
+
+// Statuses whose stock is still out of the warehouse on the order's behalf:
+// the units leave the books at creation and come back if the order dies
+// before dispatch. Dispatched parcels are gone; a return restocks on arrival.
+const ON_SHELF = [OrderStatus.NEW, OrderStatus.PACKED];
+
+// The one precondition for approving or rejecting a claim.
+const PENDING_KIT = {
+  type: OrderType.WELCOME_KIT,
+  approvalStatus: ApprovalStatus.PENDING,
+  isDeleted: { $ne: true },
+};
+
+/**
+ * Forward moves PATCH /orders/:id/status may make. Backwards is
+ * revert-status; RETURNED is POST /orders/returned. Same-status entries let
+ * a pack retry a pending barcode and a dispatch correct its tracking number.
+ * NEW → DISPATCHED is the admin board's "dispatch without packing".
+ */
+export const ALLOWED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
+  [OrderStatus.NEW]: [OrderStatus.PACKED, OrderStatus.DISPATCHED, OrderStatus.CANCELLED],
+  [OrderStatus.PACKED]: [OrderStatus.PACKED, OrderStatus.DISPATCHED, OrderStatus.CANCELLED],
+  [OrderStatus.DISPATCHED]: [OrderStatus.DISPATCHED, OrderStatus.DELIVERED],
+  [OrderStatus.DELIVERED]: [],
+  [OrderStatus.RETURNED]: [],
+  [OrderStatus.CANCELLED]: [],
+};
+
+// Media ZIP limits: customer photos are a few MB; anything far beyond is not one.
+const MEDIA_FETCH_TIMEOUT_MS = 15_000;
+const MEDIA_MAX_BYTES = 25 * 1024 * 1024;
 
 // Approved WhatsApp templates that tell a customer where their parcel is.
 // Overridable by env so a re-approved template can be swapped without a deploy.
@@ -45,6 +80,25 @@ const DEFAULT_ORDER_IMAGE_URL = 'https://tribemerchandise.com/tribe-logo.png';
 const sizeOf = (item: any): string | undefined =>
   item?.customizationType === 'SIZE' ? item.customizationValue : undefined;
 
+/**
+ * The admin order tables filter by one tribe or several — `coachId` arrives as
+ * one id, a comma-separated list, or repeated query params. Returns the Mongo
+ * condition, or undefined for "every tribe". A malformed id is a 400 rather
+ * than a filter that silently matches nothing.
+ */
+function coachIdsFilter(coachId?: string | string[]) {
+  if (!coachId) return undefined;
+  const ids = [coachId]
+    .flat()
+    .flatMap((v) => String(v).split(','))
+    .map((v) => v.trim())
+    .filter(Boolean);
+  if (ids.some((id) => !isValidObjectId(id))) {
+    throw new BadRequestException('Invalid tribe id');
+  }
+  return ids.length ? { $in: ids } : undefined;
+}
+
 @Injectable()
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
@@ -62,6 +116,10 @@ export class OrdersService {
   // Public endpoint — NEVER trust client-supplied coachId / type / prices.
   // The campaign (or the products themselves) is the source of truth; this
   // prevents forged orders that mint commission to arbitrary tribes.
+  //
+  // Everything that can reject the order is checked before any stock moves;
+  // the writes that follow (stock, save, commission) are undone together if
+  // one of them fails. No Mongo transaction — dev runs a standalone mongod.
   async create(orderData: any, opts: { trusted?: boolean } = {}): Promise<Order> {
     const rawItems: any[] = orderData.items || [];
     if (!rawItems.length) throw new BadRequestException('Order has no items');
@@ -85,76 +143,6 @@ export class OrdersService {
     }
 
     const type: OrderType = campaign ? campaign.type : OrderType.STORE_SALE;
-    const campaignPrice = new Map<string, number>();
-    if (campaign) {
-      for (const cp of campaign.products || []) {
-        campaignPrice.set(String(cp.productId), cp.retailPrice || 0);
-      }
-    }
-
-    let coachId: string | null = campaign ? String(campaign.coachId) : null;
-    let totalCommission = 0;
-    let totalAmount = 0;
-    let totalCost = 0;
-    const itemsWithDetails: any[] = [];
-    // Track decrements so we can roll them back on any failure.
-    const decremented: { id: string; qty: number; size?: string }[] = [];
-
-    try {
-      for (const item of rawItems) {
-        const product = await this.productsService.findOne(item.productId);
-
-        // All items must belong to one tribe; derive it server-side.
-        if (!coachId) coachId = String(product.coachId);
-        else if (String(product.coachId) !== coachId) {
-          throw new BadRequestException('All items must belong to the same tribe');
-        }
-        if (campaign && !campaignPrice.has(String(product._id))) {
-          throw new BadRequestException('Product is not part of this campaign');
-        }
-
-        const quantity = Math.max(1, Number(item.quantity) || 1);
-        // SERVER-DERIVED price — ignore whatever the client sent.
-        const retailPrice =
-          type === OrderType.STORE_SALE
-            ? campaign
-              ? campaignPrice.get(String(product._id)) || 0
-              : product.retailPrice || 0
-            : 0;
-
-        let commission = 0;
-        if (type === OrderType.STORE_SALE) {
-          commission = (retailPrice - product.baseProductionCost) * quantity;
-          totalAmount += retailPrice * quantity;
-        }
-        totalCost += product.baseProductionCost * quantity;
-        totalCommission += commission;
-
-        // Stock never blocks an order or claim: it may go below zero, and that
-        // shortfall is what the admin restocks. A sized item draws from its size.
-        const size = item.customizationType === 'SIZE' ? item.customizationValue : undefined;
-        await this.productsService.decrementStock(String(product._id), quantity, size);
-        decremented.push({ id: String(product._id), qty: quantity, size });
-
-        itemsWithDetails.push({
-          productId: product._id,
-          quantity,
-          retailPrice,
-          baseCost: product.baseProductionCost,
-          commission,
-          ...(item.customizationType
-            ? { customizationType: item.customizationType, customizationValue: item.customizationValue }
-            : {}),
-        });
-      }
-    } catch (err) {
-      // Compensate: restore any stock already decremented in this attempt.
-      for (const d of decremented) await this.productsService.incrementStock(d.id, d.qty, d.size);
-      throw err;
-    }
-
-    if (!coachId) throw new BadRequestException('Could not resolve the tribe for this order');
-
     const isWelcomeKit = type === OrderType.WELCOME_KIT;
 
     // Address handling depends on the campaign's form type. "Without address"
@@ -195,6 +183,69 @@ export class OrdersService {
       shippingAddress = addr;
     }
 
+    const campaignPrice = new Map<string, number>();
+    if (campaign) {
+      for (const cp of campaign.products || []) {
+        campaignPrice.set(String(cp.productId), cp.retailPrice || 0);
+      }
+    }
+
+    let coachId: string | null = campaign ? String(campaign.coachId) : null;
+    let totalCommission = 0;
+    let totalAmount = 0;
+    let totalCost = 0;
+    const itemsWithDetails: any[] = [];
+
+    // Pass 1 — validate and price every line. Nothing is written yet.
+    for (const item of rawItems) {
+      const product = await this.productsService.findOne(item.productId);
+
+      // All items must belong to one tribe; derive it server-side.
+      if (!coachId) coachId = String(product.coachId);
+      else if (String(product.coachId) !== coachId) {
+        throw new BadRequestException('All items must belong to the same tribe');
+      }
+      if (campaign && !campaignPrice.has(String(product._id))) {
+        throw new BadRequestException('Product is not part of this campaign');
+      }
+      // A PHOTO value is a URL the server later downloads (media ZIP), so it
+      // must point at our own upload bucket and nowhere else.
+      if (item.customizationType === 'PHOTO' && item.customizationValue &&
+          !isAllowedMediaUrl(item.customizationValue)) {
+        throw new BadRequestException('Upload the photo through the form before ordering');
+      }
+
+      const quantity = Math.max(1, Math.floor(Number(item.quantity)) || 1);
+      // SERVER-DERIVED price — ignore whatever the client sent.
+      const retailPrice =
+        type === OrderType.STORE_SALE
+          ? campaign
+            ? campaignPrice.get(String(product._id)) || 0
+            : product.retailPrice || 0
+          : 0;
+
+      let commission = 0;
+      if (type === OrderType.STORE_SALE) {
+        commission = (retailPrice - product.baseProductionCost) * quantity;
+        totalAmount += retailPrice * quantity;
+      }
+      totalCost += product.baseProductionCost * quantity;
+      totalCommission += commission;
+
+      itemsWithDetails.push({
+        productId: product._id,
+        quantity,
+        retailPrice,
+        baseCost: product.baseProductionCost,
+        commission,
+        ...(item.customizationType
+          ? { customizationType: item.customizationType, customizationValue: item.customizationValue }
+          : {}),
+      });
+    }
+
+    if (!coachId) throw new BadRequestException('Could not resolve the tribe for this order');
+
     // Explicit build — do NOT spread client orderData (mass-assignment guard).
     const order = new this.orderModel({
       coachId,
@@ -218,8 +269,41 @@ export class OrdersService {
         note: isWelcomeKit ? 'Order placed — awaiting approval' : 'Order placed',
       }],
     });
+    // Schema validation up front too, so a bad document never costs stock.
+    await order.validate();
 
-    const savedOrder = await order.save();
+    // Pass 2 — the writes. Track each so a failure can put everything back.
+    const decremented: { id: string; qty: number; size?: string }[] = [];
+    let savedOrder: Order | null = null;
+    try {
+      // Stock never blocks an order or claim: it may go below zero, and that
+      // shortfall is what the admin restocks. A sized item draws from its size.
+      for (const item of itemsWithDetails) {
+        const size = sizeOf(item);
+        await this.productsService.decrementStock(String(item.productId), item.quantity, size);
+        decremented.push({ id: String(item.productId), qty: item.quantity, size });
+      }
+
+      savedOrder = await order.save();
+
+      // Record transactions only for store sales (welcome kits deferred until approval)
+      if (type === OrderType.STORE_SALE && totalCommission > 0) {
+        await this.transactionsService.create({
+          coachId,
+          type: TransactionType.COMMISSION,
+          amount: totalCommission,
+          orderId: savedOrder._id as any,
+          description: `Commission from Order #${savedOrder._id.toString().slice(-6)}`,
+        });
+      }
+    } catch (err) {
+      // Compensate: drop the half-made order and restore any stock taken.
+      if (savedOrder) {
+        await this.orderModel.deleteOne({ _id: savedOrder._id } as any).exec().catch(() => undefined);
+      }
+      for (const d of decremented) await this.productsService.incrementStock(d.id, d.qty, d.size);
+      throw err;
+    }
 
     // Increment campaign claims if applicable
     if (orderData.campaignId) {
@@ -228,18 +312,17 @@ export class OrdersService {
       });
     }
 
-    // Record transactions only for store sales (welcome kits deferred until approval)
-    if (type === OrderType.STORE_SALE && totalCommission > 0) {
-      await this.transactionsService.create({
-        coachId,
-        type: TransactionType.COMMISSION,
-        amount: totalCommission,
-        orderId: savedOrder._id as any,
-        description: `Commission from Order #${savedOrder._id.toString().slice(-6)}`,
-      });
-    }
-
     return savedOrder;
+  }
+
+  /**
+   * Whether a signed-in TRIBE caller owns the campaign it is submitting
+   * against — part of deciding if it may skip the public-form checks.
+   */
+  async isCampaignOwnedBy(campaignId: string, coachId: string): Promise<boolean> {
+    if (!isValidObjectId(campaignId) || !coachId) return false;
+    const campaign = await this.campaignModel.findById(campaignId).select('coachId').lean().exec();
+    return !!campaign && String(campaign.coachId) === String(coachId);
   }
 
   // ---- Address-pending claims ("without address" campaigns) ----
@@ -266,18 +349,23 @@ export class OrdersService {
   }
 
   // Public: does an address-pending claim exist for this campaign + phone?
-  async findPendingClaim(campaignId: string, phone: string) {
+  // The name on the claim is only returned to a caller who has proven the
+  // number over WhatsApp — otherwise this would map phone numbers to names.
+  async findPendingClaim(campaignId: string, phone: string, otpToken?: string) {
     const cleanPhone = String(phone || '').trim();
     if (!isValidObjectId(campaignId) || !cleanPhone) return { found: false, count: 0 };
     const orders = await this.orderModel
       .find({ campaignId, addressPending: true, 'shippingAddress.phone': cleanPhone, isDeleted: { $ne: true } } as any)
-      .select('shippingAddress createdAt')
+      .select('shippingAddress.fullName createdAt')
       .sort({ createdAt: -1 })
       .exec();
+    const verified = !!otpToken && this.otpService.checkProof(otpToken, cleanPhone).ok;
     return {
       found: orders.length > 0,
       count: orders.length,
-      fullName: orders[0]?.shippingAddress?.fullName,
+      ...(verified && orders[0]?.shippingAddress?.fullName
+        ? { fullName: orders[0].shippingAddress.fullName }
+        : {}),
     };
   }
 
@@ -389,45 +477,55 @@ export class OrdersService {
   }
 
   // Admin: SOFT-delete an order — hidden from all lists/pipeline, recoverable via
-  // restore. Frees stock (unless already shipped/cancelled) and removes ledger
-  // entries so a deleted order stops counting toward the tribe's balance.
+  // restore. Frees stock while it is still on the shelf (NEW/PACKED — a
+  // dispatched parcel has left, a returned one was restocked when it came back,
+  // a cancelled one was restocked when cancelled) and reverses its commission.
   async deleteOrder(id: string): Promise<void> {
-    const order = await this.orderModel.findById(id).populate('items.productId').exec();
-    if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
-    if (order.isDeleted) return;
-
-    if (order.status !== OrderStatus.DELIVERED && order.status !== OrderStatus.CANCELLED) {
-      for (const item of order.items) {
-        const pid = (item.productId as any)?._id || item.productId;
-        if (pid) await this.productsService.incrementStock(String(pid), item.quantity, sizeOf(item));
+    // Atomic flip, returning the order as it was: of two concurrent deletes
+    // only one matches, so stock and ledger move once.
+    const order = await this.orderModel
+      .findOneAndUpdate(
+        { _id: id, isDeleted: { $ne: true } } as any,
+        { $set: { isDeleted: true, deletedAt: new Date() } },
+        { new: false },
+      )
+      .exec();
+    if (!order) {
+      if (!(await this.orderModel.exists({ _id: id } as any))) {
+        throw new NotFoundException(`Order with ID ${id} not found`);
       }
+      return; // already deleted
+    }
+
+    if (ON_SHELF.includes(order.status)) {
+      await this.moveItemsStock(order.items, +1);
     }
     // Free the barcode back to the pool only while the order is still in the
     // "Ready to Ship" (PACKED) stage — it hasn't physically shipped yet. Once
     // DISPATCHED/DELIVERED the barcode is on a real parcel and must never be reused.
     if (order.status === OrderStatus.PACKED) {
       await this.barcodesService.releaseFromOrder(id);
-      order.trackingNumber = undefined as any;
-      order.barcodePending = false;
+      await this.orderModel
+        .updateOne({ _id: id } as any, { $unset: { trackingNumber: 1 }, $set: { barcodePending: false } })
+        .exec();
     }
-    await this.transactionsService.deleteByOrder(id);
-    order.isDeleted = true;
-    order.deletedAt = new Date();
-    await order.save();
+    await this.transactionsService.reverseByOrder(id, 'Order deleted');
   }
 
-  // Admin: restore a soft-deleted order. Re-decrements stock (best-effort) and
-  // re-creates its commission ledger entry where applicable.
+  // Admin: restore a soft-deleted order. Re-takes stock where delete freed it
+  // and re-creates its commission ledger entry where applicable.
   async restoreOrder(id: string): Promise<Order> {
-    const order = await this.orderModel.findById(id).populate('items.productId').exec();
-    if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
-    if (!order.isDeleted) return order;
+    const order = await this.orderModel
+      .findOneAndUpdate(
+        { _id: id, isDeleted: true } as any,
+        { $set: { isDeleted: false }, $unset: { deletedAt: 1 } },
+        { new: false },
+      )
+      .exec();
+    if (!order) return this.findOne(id); // not deleted (or 404s)
 
-    if (order.status !== OrderStatus.DELIVERED && order.status !== OrderStatus.CANCELLED) {
-      for (const item of order.items) {
-        const pid = (item.productId as any)?._id || item.productId;
-        if (pid) await this.productsService.decrementStock(String(pid), item.quantity, sizeOf(item));
-      }
+    if (ON_SHELF.includes(order.status)) {
+      await this.moveItemsStock(order.items, -1);
     }
     const eligibleForCommission =
       order.totalCommission > 0 &&
@@ -446,21 +544,27 @@ export class OrdersService {
     // its previous one was freed on delete.
     if (order.status === OrderStatus.PACKED && !order.trackingNumber) {
       const type = (order.deliveryType as BarcodeType | null) || null;
-      if (type) {
-        const bc = await this.barcodesService.assignToOrder(id, type);
-        if (bc) {
-          order.trackingNumber = bc.code;
-          order.barcodePending = false;
-        } else {
-          order.barcodePending = true;
-        }
-      } else {
-        order.barcodePending = true;
-      }
+      const bc = type ? await this.barcodesService.assignToOrder(id, type) : null;
+      await this.orderModel
+        .updateOne(
+          { _id: id } as any,
+          bc
+            ? { $set: { trackingNumber: bc.code, barcodePending: false } }
+            : { $set: { barcodePending: true } },
+        )
+        .exec();
     }
-    order.isDeleted = false;
-    order.deletedAt = undefined as any;
-    return order.save();
+    return this.findOne(id);
+  }
+
+  /** Moves each line's stock back (+1) onto the shelf or off it again (-1). */
+  private async moveItemsStock(items: any[], direction: 1 | -1): Promise<void> {
+    for (const item of items || []) {
+      const pid = (item.productId as any)?._id || item.productId;
+      if (!pid) continue;
+      if (direction > 0) await this.productsService.incrementStock(String(pid), item.quantity, sizeOf(item));
+      else await this.productsService.decrementStock(String(pid), item.quantity, sizeOf(item));
+    }
   }
 
   /**
@@ -485,14 +589,15 @@ export class OrdersService {
     totalPages: number;
   }> {
     const page = Math.max(1, Number(options.page) || 1);
-    const limit = Math.min(100, Math.max(1, Number(options.limit) || 20));
+    const limit = pageSizeOf(options.limit, 20);
     const skip = (page - 1) * limit;
 
     const filter: any = {
       approvalStatus: ApprovalStatus.REJECTED,
       isDeleted: { $ne: true },
     };
-    if (options.coachId) filter.coachId = options.coachId;
+    const coaches = coachIdsFilter(options.coachId);
+    if (coaches) filter.coachId = coaches;
 
     const search = options.search?.trim();
     if (search) {
@@ -538,44 +643,48 @@ export class OrdersService {
     const code = (trackingNumber || '').trim();
     if (!code) throw new BadRequestException('Enter or scan a tracking number');
 
+    // Atomic transition: only a dispatched/delivered parcel becomes RETURNED,
+    // so scanning the same label twice (or two people at once) restocks once.
+    const now = new Date();
     const order = await this.orderModel
-      .findOne({ trackingNumber: code, isDeleted: { $ne: true } } as any)
-      .populate('items.productId')
+      .findOneAndUpdate(
+        {
+          trackingNumber: code,
+          isDeleted: { $ne: true },
+          status: { $in: [OrderStatus.DISPATCHED, OrderStatus.DELIVERED] },
+        } as any,
+        {
+          $set: { status: OrderStatus.RETURNED, returnedAt: now, ...(note ? { returnNote: note } : {}) },
+          $push: { statusHistory: { status: OrderStatus.RETURNED, at: now, note } },
+        },
+        { new: true },
+      )
       .exec();
     if (!order) {
-      throw new NotFoundException(`No order found with tracking number ${code}`);
-    }
-    if (order.status === OrderStatus.RETURNED) {
-      throw new BadRequestException('That parcel is already logged as returned');
-    }
-    // A parcel can only come back if it went out.
-    if (
-      order.status !== OrderStatus.DISPATCHED &&
-      order.status !== OrderStatus.DELIVERED
-    ) {
+      const existing = await this.orderModel
+        .findOne({ trackingNumber: code, isDeleted: { $ne: true } } as any)
+        .select('status')
+        .exec();
+      if (!existing) {
+        throw new NotFoundException(`No order found with tracking number ${code}`);
+      }
+      if (existing.status === OrderStatus.RETURNED) {
+        throw new BadRequestException('That parcel is already logged as returned');
+      }
+      // A parcel can only come back if it went out.
       throw new BadRequestException(
-        `This order is ${order.status.toLowerCase()} — only a dispatched or delivered parcel can be returned`,
+        `This order is ${existing.status.toLowerCase()} — only a dispatched or delivered parcel can be returned`,
       );
     }
 
-    for (const item of order.items) {
-      const pid = (item.productId as any)?._id || item.productId;
-      if (pid) await this.productsService.incrementStock(String(pid), item.quantity, sizeOf(item));
-    }
-
-    const now = new Date();
-    order.status = OrderStatus.RETURNED;
-    order.returnedAt = now;
-    if (note) order.returnNote = note;
-    if (!order.statusHistory) order.statusHistory = [] as any;
-    order.statusHistory.push({ status: OrderStatus.RETURNED, at: now, note });
-    const saved = await order.save();
+    // The goods are physically back on the shelf.
+    await this.moveItemsStock(order.items, +1);
 
     // Ask the customer to confirm their address, since an undelivered parcel is
     // usually a bad one. Deliberately not awaited, and it never throws: logging
     // a return at the packing bench must not fail because WhatsApp is slow.
     void this.notifyCustomerOfStatus(String(order._id), OrderStatus.RETURNED);
-    return saved;
+    return order;
   }
 
   /** Admin: returned parcels, paginated and searchable (tracking number included). */
@@ -589,14 +698,15 @@ export class OrdersService {
     totalPages: number;
   }> {
     const page = Math.max(1, Number(options.page) || 1);
-    const limit = Math.min(100, Math.max(1, Number(options.limit) || 20));
+    const limit = pageSizeOf(options.limit, 20);
     const skip = (page - 1) * limit;
 
     const filter: any = {
       status: OrderStatus.RETURNED,
       isDeleted: { $ne: true },
     };
-    if (options.coachId) filter.coachId = options.coachId;
+    const coaches = coachIdsFilter(options.coachId);
+    if (coaches) filter.coachId = coaches;
 
     const search = options.search?.trim();
     if (search) {
@@ -636,23 +746,28 @@ export class OrdersService {
    * was actually sent to: a corrected address applies to the replacement only.
    */
   async reorderReturned(id: string, address?: any): Promise<Order> {
-    const original = await this.orderModel.findById(id).exec();
-    if (!original) throw new NotFoundException(`Order with ID ${id} not found`);
-    if (original.status !== OrderStatus.RETURNED) {
-      throw new BadRequestException('Only a returned order can be sent again');
-    }
-    if (original.reorderedTo) {
+    // Claim the original first, atomically: of two concurrent re-sends only
+    // one links a replacement, so the stock is taken once.
+    const replacementId = new Types.ObjectId();
+    const original = await this.orderModel
+      .findOneAndUpdate(
+        { _id: id, status: OrderStatus.RETURNED, reorderedTo: null, isDeleted: { $ne: true } } as any,
+        { $set: { reorderedTo: replacementId } },
+        { new: false },
+      )
+      .exec();
+    if (!original) {
+      const existing = await this.orderModel.findById(id).select('status reorderedTo isDeleted').exec();
+      if (!existing || existing.isDeleted) throw new NotFoundException(`Order with ID ${id} not found`);
+      if (existing.status !== OrderStatus.RETURNED) {
+        throw new BadRequestException('Only a returned order can be sent again');
+      }
       throw new BadRequestException('This return has already been sent again');
-    }
-
-    // Stock was returned when the parcel came back; the replacement consumes it.
-    for (const item of original.items) {
-      const pid = (item.productId as any)?._id || item.productId;
-      if (pid) await this.productsService.decrementStock(String(pid), item.quantity, sizeOf(item));
     }
 
     const now = new Date();
     const replacement = new this.orderModel({
+      _id: replacementId,
       coachId: original.coachId,
       campaignId: original.campaignId,
       type: original.type,
@@ -672,17 +787,29 @@ export class OrdersService {
       reorderedFrom: original._id,
       statusHistory: [{ status: OrderStatus.NEW, at: now, note: 'Re-sent after return' }],
     });
-    const saved = await replacement.save();
 
-    original.reorderedTo = saved._id as any;
-    await original.save();
-    return saved;
+    // Stock was returned when the parcel came back; the replacement consumes it.
+    let stockTaken = false;
+    try {
+      await replacement.validate();
+      await this.moveItemsStock(original.items, -1);
+      stockTaken = true;
+      return await replacement.save();
+    } catch (err) {
+      // Undo the claim so the return can be re-sent once the problem is fixed.
+      if (stockTaken) await this.moveItemsStock(original.items, +1);
+      await this.orderModel
+        .updateOne({ _id: id, reorderedTo: replacementId } as any, { $unset: { reorderedTo: 1 } })
+        .exec();
+      throw err;
+    }
   }
 
   // Admin: list soft-deleted orders (optionally scoped to a tribe).
-  async findDeleted(coachId?: string): Promise<Order[]> {
+  async findDeleted(coachId?: string | string[]): Promise<Order[]> {
     const filter: any = { isDeleted: true };
-    if (coachId) filter.coachId = coachId;
+    const coaches = coachIdsFilter(coachId);
+    if (coaches) filter.coachId = coaches;
     return this.orderModel
       .find(filter)
       .sort({ deletedAt: -1 })
@@ -692,10 +819,41 @@ export class OrdersService {
       .exec();
   }
 
+  /**
+   * Downloads one media file, bounded in time and size. Redirects are refused
+   * so an allowed URL can't bounce the server somewhere else.
+   */
+  private async fetchMedia(url: string): Promise<Buffer | null> {
+    const resp = await fetch(url, {
+      redirect: 'error',
+      signal: AbortSignal.timeout(MEDIA_FETCH_TIMEOUT_MS),
+    });
+    if (!resp.ok || !resp.body) return null;
+    const declared = Number(resp.headers.get('content-length') || 0);
+    if (declared > MEDIA_MAX_BYTES) return null;
+
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const reader = resp.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MEDIA_MAX_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks);
+  }
+
   // Admin: stream a ZIP of the customer-uploaded PHOTO media for the given orders.
   // Images are fetched server-side from their public URLs (no browser CORS issues).
   async streamMediaZip(orderIds: string[], res: Response): Promise<void> {
-    const ids = (orderIds || []).filter((id) => isValidObjectId(id));
+    const ids = (orderIds || [])
+      .filter((id) => isValidObjectId(id))
+      .slice(0, MAX_MEDIA_ORDERS);
     const orders = ids.length
       ? await this.orderModel.find({ _id: { $in: ids } } as any).exec()
       : [];
@@ -716,10 +874,11 @@ export class OrdersService {
       let idx = 0;
       for (const item of ((o.items as any[]) || [])) {
         if (item.customizationType !== 'PHOTO' || !item.customizationValue) continue;
+        // Only our own bucket is ever fetched — older orders may hold anything.
+        if (!isAllowedMediaUrl(item.customizationValue)) continue;
         try {
-          const resp = await fetch(String(item.customizationValue));
-          if (!resp.ok) continue;
-          const buf = Buffer.from(await resp.arrayBuffer());
+          const buf = await this.fetchMedia(String(item.customizationValue));
+          if (!buf) continue;
           const ext = (String(item.customizationValue).split('?')[0].split('.').pop() || 'jpg').slice(0, 5);
           let name = `${base}-${short}-${++idx}.${ext}`;
           while (used.has(name)) name = `${base}-${short}-${++idx}.${ext}`;
@@ -739,67 +898,100 @@ export class OrdersService {
     note?: string,
     selectedItemIds?: string[],
   ): Promise<Order> {
-    const order = await this.orderModel.findById(id).exec();
-    if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
-    if (order.type !== OrderType.WELCOME_KIT) throw new BadRequestException('Only Welcome Kit orders require approval');
-    if (order.approvalStatus !== ApprovalStatus.PENDING) throw new BadRequestException('Order is not pending approval');
-
     const now = new Date();
-    order.approvalStatus = ApprovalStatus.APPROVED;
-    order.approvedBy = approvedBy;
-    order.approvedAt = now;
-    if (note) order.approvalNote = note;
-    if (!order.statusHistory) order.statusHistory = [] as any;
-    order.statusHistory.push({ status: 'APPROVED', at: now, note });
+    const update: any = {
+      $set: {
+        approvalStatus: ApprovalStatus.APPROVED,
+        approvedBy,
+        approvedAt: now,
+        ...(note ? { approvalNote: note } : {}),
+      },
+      $push: { statusHistory: { status: 'APPROVED', at: now, note } },
+    };
+    const options: { new: true; arrayFilters?: Record<string, unknown>[] } = { new: true };
 
     // If a selection was provided, mark items not in the list as unselected
     // (item is kept in the order, only its `selected` flag changes).
     if (Array.isArray(selectedItemIds)) {
-      const selectedSet = new Set(selectedItemIds.map(String));
-      order.items.forEach((item: any) => {
-        item.selected = selectedSet.has(item._id.toString());
-      });
-      order.markModified('items');
+      const selected = selectedItemIds
+        .filter((i) => isValidObjectId(i))
+        .map((i) => new Types.ObjectId(String(i)));
+      update.$set['items.$[kept].selected'] = true;
+      update.$set['items.$[dropped].selected'] = false;
+      options.arrayFilters = [
+        { 'kept._id': { $in: selected } },
+        { 'dropped._id': { $nin: selected } },
+      ];
     }
 
-    const savedOrder = await order.save();
+    // Atomic PENDING → APPROVED: a double click (or tribe and admin at once)
+    // approves once, so commission is recorded once.
+    const savedOrder = await this.orderModel
+      .findOneAndUpdate(
+        { _id: id, ...PENDING_KIT } as any,
+        update,
+        options,
+      )
+      .exec();
+    if (!savedOrder) await this.explainNotPending(id);
 
     // Record commission transaction on approval if applicable
-    if (order.totalCommission > 0) {
+    if (savedOrder!.totalCommission > 0) {
       await this.transactionsService.create({
-        coachId: order.coachId as any,
+        coachId: savedOrder!.coachId as any,
         type: TransactionType.COMMISSION,
-        amount: order.totalCommission,
-        orderId: savedOrder._id as any,
-        description: `Commission from Approved Kit Order #${savedOrder._id.toString().slice(-6)}`,
+        amount: savedOrder!.totalCommission,
+        orderId: savedOrder!._id as any,
+        description: `Commission from Approved Kit Order #${savedOrder!._id.toString().slice(-6)}`,
       });
     }
 
-    return savedOrder;
+    return savedOrder!;
   }
 
   async rejectOrder(id: string, rejectedBy: string, note?: string): Promise<Order> {
-    const order = await this.orderModel.findById(id).populate('items.productId').exec();
-    if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
-    if (order.type !== OrderType.WELCOME_KIT) throw new BadRequestException('Only Welcome Kit orders require approval');
-    if (order.approvalStatus !== ApprovalStatus.PENDING) throw new BadRequestException('Order is not pending approval');
-
     const now = new Date();
-    order.approvalStatus = ApprovalStatus.REJECTED;
-    order.approvedBy = rejectedBy;
-    order.approvedAt = now;
-    order.status = OrderStatus.CANCELLED;
-    if (note) order.approvalNote = note;
-    if (!order.statusHistory) order.statusHistory = [] as any;
-    order.statusHistory.push({ status: 'REJECTED', at: now, note });
+    // Atomic PENDING → REJECTED, returning the order as it was, so stock is
+    // restored exactly once. Only while it is still on the shelf.
+    const before = await this.orderModel
+      .findOneAndUpdate(
+        { _id: id, ...PENDING_KIT, status: { $in: ON_SHELF } } as any,
+        {
+          $set: {
+            approvalStatus: ApprovalStatus.REJECTED,
+            approvedBy: rejectedBy,
+            approvedAt: now,
+            status: OrderStatus.CANCELLED,
+            ...(note ? { approvalNote: note } : {}),
+          },
+          $push: { statusHistory: { status: 'REJECTED', at: now, note } },
+        },
+        { new: false },
+      )
+      .exec();
+    if (!before) await this.explainNotPending(id);
 
     // Restore stock atomically.
-    for (const item of order.items) {
-      const pid = (item.productId as any)?._id || item.productId;
-      await this.productsService.incrementStock(String(pid), item.quantity, sizeOf(item));
+    await this.moveItemsStock(before!.items, +1);
+    // A pending claim packed by mistake still holds a barcode; free it.
+    if (before!.status === OrderStatus.PACKED) {
+      await this.barcodesService.releaseFromOrder(id);
+      await this.orderModel
+        .updateOne({ _id: id } as any, { $unset: { trackingNumber: 1 }, $set: { barcodePending: false } })
+        .exec();
     }
+    return this.findOne(id);
+  }
 
-    return order.save();
+  // Why an approve/reject precondition didn't match, as the right error.
+  private async explainNotPending(id: string): Promise<never> {
+    const order = await this.orderModel
+      .findOne({ _id: id, isDeleted: { $ne: true } } as any)
+      .select('type approvalStatus')
+      .exec();
+    if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
+    if (order.type !== OrderType.WELCOME_KIT) throw new BadRequestException('Only Welcome Kit orders require approval');
+    throw new BadRequestException('Order is not pending approval');
   }
 
   async findPendingApprovals(coachId?: string): Promise<Order[]> {
@@ -831,7 +1023,7 @@ export class OrdersService {
     totalPages: number;
   }> {
     const page = Math.max(1, Number(options.page) || 1);
-    const limit = Math.min(100, Math.max(1, Number(options.limit) || 10));
+    const limit = pageSizeOf(options.limit, 10);
     const skip = (page - 1) * limit;
 
     const filter: any = { ...NOT_REJECTED, coachId, isDeleted: { $ne: true } };
@@ -888,14 +1080,14 @@ export class OrdersService {
   }
 
   // Same as findByCoachPaginated but across ALL coaches (admin Orders page),
-  // or one of them when `coachId` narrows it.
+  // or the ones `coachId` names — one id, or several comma-separated.
   async findAllPaginated(
     options: {
       page?: number;
       limit?: number;
       search?: string;
       status?: string;
-      coachId?: string;
+      coachId?: string | string[];
     } = {},
   ): Promise<{
     data: Order[];
@@ -905,11 +1097,12 @@ export class OrdersService {
     totalPages: number;
   }> {
     const page = Math.max(1, Number(options.page) || 1);
-    const limit = Math.min(100, Math.max(1, Number(options.limit) || 10));
+    const limit = pageSizeOf(options.limit, 10);
     const skip = (page - 1) * limit;
 
     const filter: any = { ...NOT_REJECTED, isDeleted: { $ne: true } };
-    if (options.coachId) filter.coachId = options.coachId;
+    const coaches = coachIdsFilter(options.coachId);
+    if (coaches) filter.coachId = coaches;
     if (options.status) {
       filter.status = options.status;
       // "New" excludes welcome-kit orders still awaiting approval — those live in
@@ -962,7 +1155,10 @@ export class OrdersService {
   }
 
   async findOne(id: string): Promise<Order> {
-    const order = await this.orderModel.findById(id).populate('items.productId').exec();
+    const order = await this.orderModel
+      .findOne({ _id: id, isDeleted: { $ne: true } } as any)
+      .populate('items.productId')
+      .exec();
     if (!order) {
       throw new NotFoundException(`Order with ID ${id} not found`);
     }
@@ -976,8 +1172,29 @@ export class OrdersService {
     deliveryType?: BarcodeType,
   ): Promise<Order> {
     const now = new Date();
-    const order = await this.orderModel.findById(id).exec();
+    const order = await this.orderModel
+      .findOne({ _id: id, isDeleted: { $ne: true } } as any)
+      .exec();
     if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
+
+    // Validate the move before anything is claimed or changed. Going backwards
+    // is revert-status's job; a return is logged with POST /orders/returned.
+    const previousStatus = order.status;
+    if (!(ALLOWED_TRANSITIONS[previousStatus] || []).includes(status)) {
+      throw new BadRequestException(
+        `A ${previousStatus.toLowerCase()} order can't be moved to ${status.toLowerCase()}`,
+      );
+    }
+    if (
+      order.approvalStatus === ApprovalStatus.PENDING &&
+      status !== OrderStatus.CANCELLED
+    ) {
+      throw new BadRequestException('Approve this claim before it can be fulfilled');
+    }
+
+    const $set: any = { status };
+    const $unset: any = {};
+    const explicitTracking = trackingNumber?.trim();
 
     // Auto-assign a postal tracking barcode when an order is packed / made ready to
     // ship (the "Pack" action moves NEW → PACKED). Idempotent (keeps an already-
@@ -985,7 +1202,8 @@ export class OrdersService {
     // explicit tracking number is supplied. If no barcode of the order's delivery
     // type is available, the order still advances but is flagged `barcodePending`
     // so it can be assigned once more are uploaded.
-    if (status === OrderStatus.PACKED && !(trackingNumber && trackingNumber.trim())) {
+    let claimed: { _id: any; code: string } | null = null;
+    if (status === OrderStatus.PACKED && !explicitTracking) {
       // Resolve the delivery type: an explicit choice at pack time (confirmation
       // dialog) wins, otherwise the order's own type. NEVER default silently — a
       // barcode is a real consignment, so an unset type must be chosen first.
@@ -996,27 +1214,58 @@ export class OrdersService {
         );
       }
       if (deliveryType && deliveryType !== order.deliveryType) {
-        order.deliveryType = deliveryType;
+        $set.deliveryType = deliveryType;
       }
-      const barcode = await this.barcodesService.assignToOrder(id, resolvedType);
+      const hadBarcode = !!(await this.barcodesService.findByOrder(id));
+      const barcode: any = await this.barcodesService.assignToOrder(id, resolvedType);
       if (barcode) {
-        order.trackingNumber = barcode.code;
-        order.barcodePending = false;
+        $set.trackingNumber = barcode.code;
+        $set.barcodePending = false;
+        if (!hadBarcode) claimed = barcode;
       } else {
-        order.barcodePending = true;
+        $set.barcodePending = true;
       }
     }
 
-    const previousStatus = order.status;
-    order.status = status;
-    if (status === OrderStatus.DELIVERED) order.deliveredAt = now;
+    if (status === OrderStatus.DELIVERED) $set.deliveredAt = now;
     // An explicit tracking number (e.g. entered at dispatch) overrides the barcode.
-    if (trackingNumber && trackingNumber.trim()) {
-      order.trackingNumber = trackingNumber.trim();
+    if (explicitTracking) $set.trackingNumber = explicitTracking;
+
+    // Cancelling before dispatch frees what the order was holding.
+    if (status === OrderStatus.CANCELLED && previousStatus === OrderStatus.PACKED) {
+      $unset.trackingNumber = 1;
+      $set.barcodePending = false;
     }
-    if (!order.statusHistory) order.statusHistory = [] as any;
-    order.statusHistory.push({ status, at: now });
-    const saved = await order.save();
+
+    // Conditional on the status we validated against: a concurrent change
+    // makes this miss instead of applying a transition from a stale state.
+    const saved = await this.orderModel
+      .findOneAndUpdate(
+        { _id: id, status: previousStatus, isDeleted: { $ne: true } } as any,
+        {
+          $set,
+          ...(Object.keys($unset).length ? { $unset } : {}),
+          $push: { statusHistory: { status, at: now } },
+        },
+        { new: true },
+      )
+      .exec();
+    if (!saved) {
+      // Give back a barcode claimed for a transition that didn't happen.
+      if (claimed) await this.barcodesService.releaseOne(claimed._id);
+      throw new ConflictException('This order changed while you were updating it — refresh and try again');
+    }
+
+    if (status === OrderStatus.CANCELLED && previousStatus !== OrderStatus.CANCELLED) {
+      // NEW/PACKED only (see ALLOWED_TRANSITIONS), so the stock is still out.
+      await this.moveItemsStock(saved.items, +1);
+      if (previousStatus === OrderStatus.PACKED) {
+        await this.barcodesService.releaseFromOrder(id);
+      }
+      // A cancelled order earns nothing: take back any commission it credited
+      // (store sales at creation, kits at approval). Idempotent per order.
+      await this.transactionsService.reverseByOrder(id, 'Order cancelled');
+    }
 
     // Only on a real transition — re-saving an already-dispatched order must not
     // message the customer twice. Deliberately not awaited: a slow Graph call
@@ -1124,7 +1373,7 @@ export class OrdersService {
    * WhatsApp notification, and undoing a misclick must not message anyone.
    */
   async revertStatus(id: string, performedBy?: string): Promise<Order> {
-    const order = await this.orderModel.findById(id).exec();
+    const order = await this.orderModel.findOne({ _id: id, isDeleted: { $ne: true } } as any).exec();
     if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
 
     const now = new Date();
@@ -1138,9 +1387,9 @@ export class OrdersService {
       order.approvalStatus = ApprovalStatus.PENDING;
       order.approvedAt = undefined as any;
       order.approvedBy = undefined as any;
-      // Approval created the commission entry; un-approving must remove it or
+      // Approval created the commission entry; un-approving must reverse it or
       // re-approving pays the tribe twice.
-      await this.transactionsService.deleteByOrder(id);
+      await this.transactionsService.reverseByOrder(id, 'Approval undone');
 
       if (!order.statusHistory) order.statusHistory = [] as any;
       order.statusHistory.push({

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -30,6 +31,11 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../schemas/user.schema';
+
+// Media types safe to render inline in the admin's browser. Note: no SVG —
+// it is an image type that can carry script.
+const INLINE_MEDIA_TYPES =
+  /^(image\/(jpeg|png|webp|gif)|audio\/(ogg|mpeg|mp4|aac|amr)|video\/(mp4|3gpp))(;.*)?$/i;
 
 /**
  * Public webhook for the WhatsApp Cloud API. This is the URL handed to Meta:
@@ -124,9 +130,22 @@ export class WhatsappAdminController {
     @Param('mediaId') mediaId: string,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
+    if (!/^\d+$/.test(mediaId)) {
+      throw new BadRequestException('Invalid media id');
+    }
     const { buffer, mimeType } = await this.whatsappService.getMedia(mediaId);
+    // The type comes from the customer's upload. Only plain media renders
+    // inline; anything else (HTML, SVG, PDFs…) downloads, so a crafted file
+    // can't run script on our API origin.
+    const inline = INLINE_MEDIA_TYPES.test(mimeType);
     res.set({
+      // The type itself is kept: the admin UI fetches media as a blob and
+      // reads it to decide how to show it.
       'Content-Type': mimeType,
+      'Content-Disposition': inline
+        ? 'inline'
+        : `attachment; filename="whatsapp-media-${mediaId}"`,
+      'X-Content-Type-Options': 'nosniff',
       // Media is immutable once sent; cache privately in the admin's browser.
       'Cache-Control': 'private, max-age=86400',
     });

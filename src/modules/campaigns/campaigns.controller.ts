@@ -8,6 +8,7 @@ import {
   UseGuards,
   Request,
   ForbiddenException,
+  BadRequestException,
 } from '@nestjs/common';
 import { CampaignsService } from './campaigns.service';
 import { TribesService } from '../tribes/tribes.service';
@@ -16,6 +17,9 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../schemas/user.schema';
 import { CampaignStatus } from '../../schemas/campaign.schema';
+import { CreateCampaignDto, UpdateCampaignDto } from './dto/campaign.dto';
+import { CurrentUserId } from '../../common/decorators/current-user.decorator';
+import { assertOwnedBy, refIdOf } from '../../common/utils/ownership';
 
 @Controller('campaigns')
 export class CampaignsController {
@@ -27,17 +31,26 @@ export class CampaignsController {
   @Get('me')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.TRIBE)
-  async findMyCampaigns(@Request() req) {
-    const userId = req.user.userId || req.user.sub || req.user._id;
-    const coach = await this.tribesService.findByUserId(userId);
-    return this.campaignsService.findByCoach(coach._id);
+  async findMyCampaigns(@CurrentUserId() userId: string) {
+    const tribeId = await this.tribesService.findIdByUserId(userId);
+    return this.campaignsService.findByCoach(tribeId);
   }
 
   @Post()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.TRIBE, UserRole.ADMIN)
-  create(@Body() campaignData: any) {
-    return this.campaignsService.create(campaignData);
+  async create(
+    @Body() dto: CreateCampaignDto,
+    @Request() req,
+    @CurrentUserId() userId: string,
+  ) {
+    // A tribe always creates under its own tribe, whatever coachId it sent.
+    let coachId = dto.coachId;
+    if (req.user.role !== UserRole.ADMIN) {
+      coachId = await this.tribesService.findIdByUserId(userId);
+    }
+    if (!coachId) throw new BadRequestException('coachId is required');
+    return this.campaignsService.create(dto, coachId);
   }
 
   @Get()
@@ -60,30 +73,32 @@ export class CampaignsController {
   @Patch(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.TRIBE, UserRole.ADMIN)
-  async update(@Param('id') id: string, @Body() campaignData: any, @Request() req) {
+  async update(
+    @Param('id') id: string,
+    @Body() dto: UpdateCampaignDto,
+    @Request() req,
+    @CurrentUserId() userId: string,
+  ) {
+    const campaign: any = await this.campaignsService.findOne(id);
+    const owner = refIdOf(campaign.coachId);
+    let coachId = owner;
     if (req.user.role !== UserRole.ADMIN) {
       // A tribe may only edit its OWN campaigns and cannot reassign ownership.
-      const coach = await this.tribesService.findByUserId(
-        req.user.userId || req.user.sub || req.user._id,
-      );
-      const campaign: any = await this.campaignsService.findOne(id);
-      const owner = String(campaign.coachId?._id || campaign.coachId);
-      if (owner !== String(coach._id)) {
-        throw new ForbiddenException('Not authorized to update this campaign');
-      }
+      const tribeId = await this.tribesService.findIdByUserId(userId);
+      assertOwnedBy(owner, tribeId, 'Not authorized to update this campaign');
       // Stopping is final for a tribe; only an admin can reactivate a stopped campaign.
       if (
         campaign.status === CampaignStatus.STOPPED &&
-        campaignData.status &&
-        campaignData.status !== CampaignStatus.STOPPED
+        dto.status &&
+        dto.status !== CampaignStatus.STOPPED
       ) {
         throw new ForbiddenException(
           'Only an admin can reactivate a stopped campaign',
         );
       }
-      delete campaignData.coachId;
-      delete campaignData.claims;
+    } else if (dto.coachId) {
+      coachId = dto.coachId;
     }
-    return this.campaignsService.update(id, campaignData);
+    return this.campaignsService.update(id, dto, coachId);
   }
 }

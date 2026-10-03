@@ -15,6 +15,7 @@ import {
   WhatsappApiService,
   type WhatsappTemplate,
 } from './whatsapp-api.service';
+import { OTP_PROOF_AUDIENCE } from '../auth/token-claims';
 
 // The authentication template used to deliver codes. Configured by Meta id
 // because that's what the template screen shows and copies; the send API needs
@@ -24,6 +25,13 @@ const DEFAULT_OTP_TEMPLATE_ID = '1521285713364906';
 const CODE_TTL_MS = 10 * 60 * 1000;
 const RESEND_COOLDOWN_MS = 60 * 1000;
 const MAX_ATTEMPTS = 5;
+// Rolling caps per number. Every send is a real WhatsApp message to someone's
+// phone, so these bound what one person can be sent however many IPs ask.
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+const MAX_SENDS_PER_HOUR = 5;
+const MAX_SENDS_PER_DAY = 10;
+const OTP_PURPOSE = 'whatsapp-otp';
 // How long a verification stays good for — long enough to fill in an address,
 // short enough that a borrowed token is useless later.
 const PROOF_TTL = '30m';
@@ -85,51 +93,134 @@ export class WhatsappOtpService {
       );
     }
 
+    const now = Date.now();
     const existing = await this.otpModel.findOne({ contact });
     if (existing) {
-      const since = Date.now() - existing.lastSentAt.getTime();
+      const since = now - existing.lastSentAt.getTime();
       if (since < RESEND_COOLDOWN_MS) {
-        const wait = Math.ceil((RESEND_COOLDOWN_MS - since) / 1000);
-        throw new BadRequestException(
-          `Please wait ${wait} more second${wait === 1 ? '' : 's'} before asking for another code.`,
-        );
+        throw this.cooldownError(RESEND_COOLDOWN_MS - since);
       }
+    }
+
+    // Rolling caps per number, on top of the per-IP throttle: rotating IPs
+    // must not turn one victim's phone into a stream of codes.
+    const age = (at: Date) => now - new Date(at).getTime();
+    const recent = (existing?.sendLog ?? []).filter((at) => age(at) < DAY_MS);
+    const lastHour = recent.filter((at) => age(at) < HOUR_MS).length;
+    if (lastHour >= MAX_SENDS_PER_HOUR) {
+      throw new BadRequestException(
+        'Too many codes requested for this number. Try again in an hour.',
+      );
+    }
+    if (recent.length >= MAX_SENDS_PER_DAY) {
+      throw new BadRequestException(
+        'Too many codes requested for this number today. Try again tomorrow.',
+      );
     }
 
     const code = String(randomInt(100000, 1000000));
     const template = await this.resolveTemplate();
+    const sentAt = new Date(now);
 
     // Store before sending: a code that went out but wasn't saved could never
-    // be verified, which is worse than one saved but undelivered.
-    await this.otpModel.updateOne(
-      { contact },
-      {
-        $set: {
-          codeHash: await bcrypt.hash(code, 10),
-          expiresAt: new Date(Date.now() + CODE_TTL_MS),
-          lastSentAt: new Date(),
-          attempts: 0,
-        },
-        $unset: { verifiedAt: 1 },
-        $setOnInsert: { contact },
+    // be verified, which is worse than one saved but undelivered. The write is
+    // conditional on the row being as we read it, so two simultaneous requests
+    // can't both get past the cooldown — the loser sees no match (or, for a
+    // first-ever send, a duplicate key) and is told to wait.
+    const update = {
+      $set: {
+        codeHash: await bcrypt.hash(code, 10),
+        expiresAt: new Date(now + CODE_TTL_MS),
+        lastSentAt: sentAt,
+        attempts: 0,
+        sendLog: [...recent, sentAt],
       },
-      { upsert: true },
-    );
+      $unset: { verifiedAt: 1 },
+      $setOnInsert: { contact },
+    };
+    try {
+      const res = existing
+        ? await this.otpModel.updateOne(
+            { contact, lastSentAt: existing.lastSentAt },
+            update,
+          )
+        : await this.otpModel.updateOne({ contact }, update, { upsert: true });
+      if (existing && !res.matchedCount) {
+        throw this.cooldownError(RESEND_COOLDOWN_MS);
+      }
+    } catch (err) {
+      if ((err as { code?: number }).code === 11000) {
+        throw this.cooldownError(RESEND_COOLDOWN_MS);
+      }
+      throw err;
+    }
 
-    await this.whatsapp.sendTemplateTo(contact, {
-      name: template.name,
-      language: template.language,
-      parameters: [code],
-    });
+    try {
+      await this.whatsapp.sendTemplateTo(
+        contact,
+        {
+          name: template.name,
+          language: template.language,
+          parameters: [code],
+        },
+        // Already resolved: skips a second template lookup on every send.
+        { template },
+      );
+    } catch (err) {
+      await this.restore(contact, sentAt, existing);
+      throw err;
+    }
 
     this.logger.log(`Sent a verification code to ${contact}`);
     return { sent: true, expiresIn: Math.floor(CODE_TTL_MS / 1000) };
   }
 
+  /**
+   * Undoes the write for a code that never went out, so a failed send doesn't
+   * clobber the code the customer may already have (or start a cooldown for a
+   * message they never got). Conditional on our own `lastSentAt`, so it can't
+   * undo a later request's code.
+   */
+  private async restore(
+    contact: string,
+    sentAt: Date,
+    previous: WhatsappOtp | null,
+  ): Promise<void> {
+    try {
+      if (!previous) {
+        await this.otpModel.deleteOne({ contact, lastSentAt: sentAt });
+        return;
+      }
+      await this.otpModel.updateOne(
+        { contact, lastSentAt: sentAt },
+        {
+          $set: {
+            codeHash: previous.codeHash,
+            expiresAt: previous.expiresAt,
+            lastSentAt: previous.lastSentAt,
+            attempts: previous.attempts,
+            sendLog: previous.sendLog ?? [],
+            ...(previous.verifiedAt ? { verifiedAt: previous.verifiedAt } : {}),
+          },
+        },
+      );
+    } catch (err) {
+      this.logger.error(
+        `Could not restore the previous code for ${contact}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  private cooldownError(remainingMs: number): BadRequestException {
+    const wait = Math.max(1, Math.ceil(remainingMs / 1000));
+    return new BadRequestException(
+      `Please wait ${wait} more second${wait === 1 ? '' : 's'} before asking for another code.`,
+    );
+  }
+
   /** Checks a code and, on success, issues the proof the order flow wants. */
   async verify(rawPhone: string, code: string): Promise<OtpVerifyResult> {
     const contact = this.whatsapp.normalizeContact(rawPhone);
-    const record = await this.otpModel.findOne({ contact });
 
     // One message for every failure mode below: telling a caller *which* part
     // was wrong would help them enumerate numbers and codes.
@@ -138,28 +229,45 @@ export class WhatsappOtpService {
         'That code is not right, or it has expired. Ask for a new one.',
       );
 
+    // Spend an attempt *before* comparing, atomically: a read-then-increment
+    // would let a burst of parallel guesses all see "attempts: 0" and get far
+    // more than MAX_ATTEMPTS tries between them.
+    const record = await this.otpModel.findOneAndUpdate(
+      {
+        contact,
+        attempts: { $lt: MAX_ATTEMPTS },
+        expiresAt: { $gt: new Date() },
+      },
+      { $inc: { attempts: 1 } },
+      { new: true },
+    );
     if (!record) throw rejected();
-    if (record.expiresAt.getTime() < Date.now()) throw rejected();
-    if (record.attempts >= MAX_ATTEMPTS) throw rejected();
 
     const matches = await bcrypt.compare(code, record.codeHash);
-    if (!matches) {
-      await this.otpModel.updateOne({ contact }, { $inc: { attempts: 1 } });
-      throw rejected();
-    }
+    if (!matches) throw rejected();
 
-    await this.otpModel.updateOne(
-      { contact },
+    // Consume the code. Conditional on it being this exact, still-unused code,
+    // so two simultaneous correct submissions get one proof between them.
+    const consumed = await this.otpModel.updateOne(
+      {
+        contact,
+        codeHash: record.codeHash,
+        verifiedAt: { $exists: false },
+        expiresAt: { $gt: new Date() },
+      },
       // Expire the code on use so the same one can't be replayed.
       { $set: { verifiedAt: new Date(), expiresAt: new Date() } },
     );
+    if (!consumed.modifiedCount) throw rejected();
 
     this.logger.log(`Verified ${contact}`);
     return {
       verified: true,
       otpToken: this.jwt.sign(
-        { sub: contact, purpose: 'whatsapp-otp' },
-        { expiresIn: PROOF_TTL },
+        { sub: contact, purpose: OTP_PURPOSE },
+        // The audience keeps a proof from ever passing as a login token, even
+        // though both are signed with the same secret.
+        { expiresIn: PROOF_TTL, audience: OTP_PROOF_AUDIENCE },
       ),
     };
   }
@@ -173,14 +281,20 @@ export class WhatsappOtpService {
     token: string,
     rawPhone: string,
   ): { ok: boolean; reason?: string } {
-    let payload: { sub?: string; purpose?: string };
+    let payload: { sub?: string; purpose?: string; aud?: string | string[] };
     try {
       payload = this.jwt.verify(token);
     } catch {
       return { ok: false, reason: 'expired' };
     }
 
-    if (payload.purpose !== 'whatsapp-otp')
+    // Both claims, so a login token (no audience) can never stand in for a
+    // proof and vice versa.
+    const audiences = [payload.aud ?? []].flat();
+    if (
+      payload.purpose !== OTP_PURPOSE ||
+      !audiences.includes(OTP_PROOF_AUDIENCE)
+    )
       return { ok: false, reason: 'wrong-token' };
 
     let contact: string;

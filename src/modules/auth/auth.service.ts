@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, ConflictException } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { UsersService } from '../users/users.service';
@@ -11,27 +11,11 @@ export class AuthService {
     private jwtService: JwtService,
   ) {}
 
-  async register(userData: any): Promise<any> {
-    const existingUser = await this.usersService.findOneByEmail(userData.email);
-    if (existingUser) {
-      throw new ConflictException('User already exists');
-    }
-
-    const hashedPassword = await bcrypt.hash(userData.password, 10);
-    const user = await this.usersService.create({
-      ...userData,
-      password: hashedPassword,
-    });
-
-    const { password, ...result } = user.toObject();
-    return result;
-  }
-
   async changePassword(
     userId: string,
     currentPassword: string,
     newPassword: string,
-  ): Promise<{ message: string }> {
+  ): Promise<{ message: string; access_token: string }> {
     const user = await this.usersService.findOneById(userId);
     if (!user || !user.password) {
       throw new UnauthorizedException('User not found');
@@ -41,8 +25,14 @@ export class AuthService {
       throw new UnauthorizedException('Current password is incorrect');
     }
     const hashed = await bcrypt.hash(newPassword, 10);
+    // Bumps tokenVersion, which signs out every existing session — including
+    // this one, so hand back a fresh token for the caller to carry on with.
     await this.usersService.updatePassword(userId, hashed);
-    return { message: 'Password updated successfully' };
+    const updated = await this.usersService.findOneById(userId);
+    return {
+      message: 'Password updated successfully',
+      access_token: this.signFor(updated ?? user),
+    };
   }
 
   async login(email: string, pass: string): Promise<any> {
@@ -56,9 +46,8 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    const payload = { email: user.email, sub: user._id, role: user.role };
     return {
-      access_token: this.jwtService.sign(payload),
+      access_token: this.signFor(user),
       user: {
         id: user._id,
         email: user.email,
@@ -66,5 +55,15 @@ export class AuthService {
         role: user.role,
       },
     };
+  }
+
+  /** A login token, stamped with the user's current tokenVersion. */
+  private signFor(user: User): string {
+    return this.jwtService.sign({
+      email: user.email,
+      sub: String(user._id),
+      role: user.role,
+      tv: user.tokenVersion ?? 0,
+    });
   }
 }

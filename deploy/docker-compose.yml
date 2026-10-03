@@ -1,4 +1,4 @@
-# Runs on the GCP VM at /opt/shipkit/docker-compose.yml
+# Runs on the EC2 box at /opt/shipkit/docker-compose.yml
 # Pulls prebuilt images from GHCR (pushed by GitHub Actions) and fronts them with Caddy.
 services:
   backend:

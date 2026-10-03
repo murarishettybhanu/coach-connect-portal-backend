@@ -10,7 +10,33 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Gate: nothing reaches the VM unless it typechecks and the specs pass.
+  # Lint is not gated yet — the codebase carries a large pre-existing backlog.
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # Throwaway Mongo so the integration specs (e.g. size-stock.int.spec.ts)
+      # run here instead of being skipped.
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npx tsc --noEmit -p tsconfig.json
+      - run: npx jest --ci
+        env:
+          MONGO_TEST_URI: mongodb://localhost:27017/shipkit_sizetest
+
   build-and-deploy:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -117,10 +143,12 @@ jobs:
               docker compose up -d caddy
             fi
             # Health gate: wait for the backend container's HEALTHCHECK to pass.
+            # Only an explicit "healthy" counts — an empty status means the
+            # container is missing or crash-looping, which must roll back.
             HEALTHY=0
             for i in $(seq 1 24); do
               ST=$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q backend)" 2>/dev/null || echo "")
-              if [ "$ST" = "healthy" ] || [ -z "$ST" ]; then HEALTHY=1; break; fi
+              if [ "$ST" = "healthy" ]; then HEALTHY=1; break; fi
               sleep 5
             done
             if [ "$HEALTHY" != "1" ]; then

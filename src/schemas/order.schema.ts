@@ -182,3 +182,11 @@ OrderSchema.index({ campaignId: 1 });
 // Fast lookup of address-pending claims per campaign (step-2 attach + bulk upload).
 OrderSchema.index({ campaignId: 1, addressPending: 1 });
 OrderSchema.index({ coachId: 1, isDeleted: 1 });
+// Returns are logged by the number on the label.
+OrderSchema.index({ trackingNumber: 1 });
+// The nightly digest and weekly report look for transitions inside a window.
+OrderSchema.index({ 'statusHistory.status': 1, 'statusHistory.at': 1 });
+// Address-pending lookup and attach on the public address page.
+OrderSchema.index({ campaignId: 1, 'shippingAddress.phone': 1 });
+// Admin listings across every tribe sort on it.
+OrderSchema.index({ createdAt: -1 });

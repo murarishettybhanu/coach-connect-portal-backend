@@ -1,6 +1,8 @@
 import {
   Injectable,
   Logger,
+  HttpException,
+  PayloadTooLargeException,
   BadGatewayException,
   BadRequestException,
   ServiceUnavailableException,
@@ -79,6 +81,59 @@ interface GraphError {
 }
 
 const GRAPH_TIMEOUT_MS = 10_000;
+
+/**
+ * Inbound media cap. WhatsApp's own limits top out at 16MB for video and
+ * 100MB for documents; anything over this is refused rather than buffered in
+ * memory on a t3.micro.
+ */
+export const MAX_MEDIA_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Hosts Meta serves media downloads from (`lookaside.fbsbx.com` today). The
+ * bearer token goes only to these: the URL comes out of a Graph response, and
+ * a token sent anywhere else would be a leaked credential.
+ */
+const MEDIA_HOST_SUFFIXES = ['.fbsbx.com', '.whatsapp.net'];
+
+export function isMetaMediaUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase();
+    return (
+      url.protocol === 'https:' &&
+      MEDIA_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix))
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Turns a failed upstream call into a client-safe exception. Meta's own
+ * wording can carry account and template internals, so it goes to the log and
+ * rides along as `upstreamDetail` (recorded on failed inbox rows, which only
+ * admins see) — never into the HTTP response.
+ *
+ * 401/403 mean *our* token or permissions are wrong, which is a server-side
+ * configuration fault, not the caller's — 503, not 400.
+ */
+function upstreamError(
+  status: number,
+  detail: string,
+  code?: number,
+): HttpException {
+  const ref = code ? ` (error ${code})` : '';
+  const err =
+    status === 401 || status === 403
+      ? new ServiceUnavailableException(
+          'WhatsApp is not authorised — check the access token and its permissions',
+        )
+      : status >= 400 && status < 500
+        ? new BadRequestException(`WhatsApp rejected the request${ref}`)
+        : new BadGatewayException(`WhatsApp is unavailable right now${ref}`);
+  return Object.assign(err, { upstreamDetail: detail });
+}
 
 /**
  * Meta's cap on a named template parameter. It is enforced on SEND, not on
@@ -266,26 +321,40 @@ export class WhatsappApiService {
    * can't be linked to directly from a browser and has to be proxied.
    */
   async downloadMedia(mediaId: string): Promise<MediaFile> {
-    const meta = await this.request<{ url?: string; mime_type?: string }>(
-      mediaId,
-      { method: 'GET' },
-    );
+    // Graph ids are numeric; anything else would be a path into another
+    // Graph endpoint, called with our token.
+    if (!/^\d+$/.test(mediaId)) {
+      throw new BadRequestException('Invalid media id');
+    }
+    const meta = await this.request<{
+      url?: string;
+      mime_type?: string;
+      file_size?: number;
+    }>(mediaId, { method: 'GET' });
     if (!meta.url) {
       throw new BadGatewayException(
         'WhatsApp returned no download URL for that media',
       );
     }
+    if (!isMetaMediaUrl(meta.url)) {
+      this.logger.error(
+        `Refusing media download for ${mediaId} from an unexpected host`,
+      );
+      throw new BadGatewayException('Could not download WhatsApp media');
+    }
+    if (Number(meta.file_size) > MAX_MEDIA_BYTES) {
+      throw new PayloadTooLargeException('That media file is too large');
+    }
 
     let res: Response;
     try {
-      res = await fetch(meta.url, {
-        headers: { Authorization: `Bearer ${this.token}` },
-        signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS),
-      });
+      res = await this.fetchMedia(meta.url);
     } catch (err) {
-      throw new BadGatewayException(
-        `Could not download WhatsApp media: ${(err as Error).message}`,
+      if (err instanceof HttpException) throw err;
+      this.logger.error(
+        `Media download for ${mediaId} failed: ${(err as Error).message}`,
       );
+      throw new BadGatewayException('Could not download WhatsApp media');
     }
 
     if (!res.ok) {
@@ -295,13 +364,60 @@ export class WhatsappApiService {
       );
     }
 
+    const declared = Number(res.headers.get('content-length'));
+    if (declared > MAX_MEDIA_BYTES) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new PayloadTooLargeException('That media file is too large');
+    }
+
     return {
-      buffer: Buffer.from(await res.arrayBuffer()),
+      // Counted as it streams too: content-length can be absent or wrong.
+      buffer: await this.readCapped(res, MAX_MEDIA_BYTES),
       mimeType:
         meta.mime_type ||
         res.headers.get('content-type') ||
         'application/octet-stream',
     };
+  }
+
+  /**
+   * Fetches with the bearer token, following redirects by hand so every hop
+   * is checked against the Meta host list before the token is sent to it.
+   */
+  private async fetchMedia(url: string, hops = 0): Promise<Response> {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${this.token}` },
+      signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS),
+      redirect: 'manual',
+    });
+    const location = res.headers.get('location');
+    if (res.status >= 300 && res.status < 400 && location) {
+      const next = new URL(location, url).toString();
+      if (hops >= 3 || !isMetaMediaUrl(next)) {
+        this.logger.error('Refusing a media redirect to an unexpected host');
+        throw new BadGatewayException('Could not download WhatsApp media');
+      }
+      return this.fetchMedia(next, hops + 1);
+    }
+    return res;
+  }
+
+  private async readCapped(res: Response, cap: number): Promise<Buffer> {
+    if (!res.body) return Buffer.alloc(0);
+    const reader = res.body.getReader();
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > cap) {
+        await reader.cancel().catch(() => undefined);
+        throw new PayloadTooLargeException('That media file is too large');
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks, total);
   }
 
   /**
@@ -388,7 +504,9 @@ export class WhatsappApiService {
     } catch (err) {
       const reason = (err as Error).message;
       this.logger.error(`Graph API request to ${path} failed: ${reason}`);
-      throw new BadGatewayException(`WhatsApp API unreachable: ${reason}`);
+      throw Object.assign(new BadGatewayException('WhatsApp API unreachable'), {
+        upstreamDetail: `WhatsApp API unreachable: ${reason}`,
+      });
     }
 
     const text = await res.text();
@@ -409,10 +527,8 @@ export class WhatsappApiService {
       this.logger.error(`Graph API ${path} → ${res.status}: ${detail}`);
 
       // 4xx from Meta is our mistake (bad number, closed window, malformed
-      // template); 5xx is theirs.
-      throw res.status >= 400 && res.status < 500
-        ? new BadRequestException(detail)
-        : new BadGatewayException(detail);
+      // template); 5xx is theirs; 401/403 is our configuration.
+      throw upstreamError(res.status, detail, graphError?.code);
     }
 
     return parsed as T;

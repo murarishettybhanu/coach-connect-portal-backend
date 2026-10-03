@@ -8,23 +8,29 @@ import { WeeklyReportService } from './weekly-report.service';
 import { OrdersController } from './orders.controller';
 import { Order, OrderSchema } from '../../schemas/order.schema';
 import { Campaign, CampaignSchema } from '../../schemas/campaign.schema';
+import { JobRun, JobRunSchema } from './job-run.schema';
 import { ProductsModule } from '../products/products.module';
 import { TransactionsModule } from '../transactions/transactions.module';
 import { TribesModule } from '../tribes/tribes.module';
 import { BarcodesModule } from '../barcodes/barcodes.module';
 import { WhatsappModule } from '../whatsapp/whatsapp.module';
+import { UsersModule } from '../users/users.module';
 
 @Module({
   imports: [
     MongooseModule.forFeature([
       { name: Order.name, schema: OrderSchema },
       { name: Campaign.name, schema: CampaignSchema },
+      // Once-per-window guard for the scheduled WhatsApp jobs.
+      { name: JobRun.name, schema: JobRunSchema },
     ]),
     ProductsModule,
     TransactionsModule,
     TribesModule,
     BarcodesModule,
     WhatsappModule,
+    // Resolves the user behind a bearer token on the public write routes.
+    UsersModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => ({

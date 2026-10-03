@@ -1,4 +1,4 @@
-import { IsMongoId, IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import { IsMongoId, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 
 export class CreatePayoutDto {
   @IsMongoId()
@@ -8,8 +8,10 @@ export class CreatePayoutDto {
   @Min(1)
   amount: number;
 
+  // Unique across payouts — the same bank transfer can't be recorded twice.
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   utrReference?: string;
 
   @IsOptional()

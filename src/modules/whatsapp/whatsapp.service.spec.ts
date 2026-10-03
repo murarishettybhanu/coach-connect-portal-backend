@@ -16,6 +16,9 @@ type UpdateCall = [
 ];
 
 const APP_SECRET = 'test-app-secret';
+
+// The acknowledgement is fire-and-forget; let its promise chain settle.
+const flush = () => new Promise((resolve) => setImmediate(resolve));
 const VERIFY_TOKEN = 'test-verify-token';
 
 // A realistic inbound text payload, trimmed to the fields we read.
@@ -61,6 +64,8 @@ describe('WhatsappService', () => {
   let listTemplates: jest.Mock;
   let getTemplateById: jest.Mock;
   let settings: Record<string, unknown>;
+  let settingFindOne: jest.Mock;
+  let settingFindOneAndUpdate: jest.Mock;
 
   beforeEach(async () => {
     process.env.WHATSAPP_APP_SECRET = APP_SECRET;
@@ -94,6 +99,8 @@ describe('WhatsappService', () => {
         components: [{ type: 'BODY' }],
       },
     ]);
+    settingFindOne = jest.fn(() => Promise.resolve(settings));
+    settingFindOneAndUpdate = jest.fn(() => Promise.resolve(settings));
     settings = {
       autoReplyEnabled: true,
       acknowledgementText: 'Thanks for messaging Tribe Merchandise.',
@@ -119,7 +126,10 @@ describe('WhatsappService', () => {
         {
           provide: getModelToken(WhatsappSetting.name),
           // getSettings() reads the singleton row; the tests mutate `settings`.
-          useValue: { findOne: jest.fn(() => Promise.resolve(settings)) },
+          useValue: {
+            findOne: settingFindOne,
+            findOneAndUpdate: settingFindOneAndUpdate,
+          },
         },
         {
           provide: WhatsappApiService,
@@ -225,9 +235,105 @@ describe('WhatsappService', () => {
       ];
       expect(input.authentication).toBe(true);
 
-      // No body text from Meta, so the thread falls back to the standard wording.
+      // The passcode must never be stored in the clear: not in the thread…
       const created = (create.mock.calls[0] as [Record<string, unknown>])[0];
-      expect(created.text).toBe('123456 is your verification code.');
+      expect(created.text).toBe('Verification code sent');
+      expect(JSON.stringify(created)).not.toContain('123456');
+      // …nor in the inbox preview.
+      const [, convUpdate] = conversationUpdateOne.mock.calls[0] as [
+        unknown,
+        { $set: { lastMessagePreview: string } },
+      ];
+      expect(convUpdate.$set.lastMessagePreview).toBe('Verification code sent');
+    });
+
+    it('redacts the code even when Meta returns the authentication body text', async () => {
+      listTemplates.mockResolvedValueOnce([
+        {
+          id: '2',
+          name: 'login_code',
+          language: 'en',
+          category: 'AUTHENTICATION',
+          status: 'APPROVED',
+          components: [
+            { type: 'BODY', text: '{{1}} is your verification code.' },
+          ],
+        },
+      ]);
+      await service.sendTemplateTo('919876543210', {
+        name: 'login_code',
+        language: 'en',
+        parameters: ['654321'],
+      });
+      const created = (create.mock.calls[0] as [Record<string, unknown>])[0];
+      expect(created.text).toBe('Verification code sent');
+    });
+
+    it('redacts the code on a failed send too', async () => {
+      sendTemplate.mockRejectedValueOnce(new Error('graph down'));
+      await expect(
+        service.sendTemplateTo('919876543210', {
+          name: 'login_code',
+          language: 'en',
+          parameters: ['123456'],
+        }),
+      ).rejects.toThrow('graph down');
+
+      const created = (create.mock.calls[0] as [Record<string, unknown>])[0];
+      expect(created.sendStatus).toBe('FAILED');
+      expect(created.text).toBe('Verification code sent');
+    });
+
+    it('uses a template handed in by the caller instead of listing them', async () => {
+      await service.sendTemplateTo(
+        '919876543210',
+        { name: 'login_code', language: 'en', parameters: ['123456'] },
+        {
+          template: {
+            id: '2',
+            name: 'login_code',
+            language: 'en',
+            category: 'AUTHENTICATION',
+            status: 'APPROVED',
+          },
+        },
+      );
+
+      expect(listTemplates).not.toHaveBeenCalled();
+      const [, input] = sendTemplate.mock.calls[0] as [
+        string,
+        { authentication?: boolean },
+      ];
+      expect(input.authentication).toBe(true);
+    });
+
+    it('reuses the template list across sends', async () => {
+      const input = {
+        name: 'order_dispatched',
+        language: 'en',
+        parameters: ['Asha', 'TM-1'],
+      };
+      await service.sendTemplateTo('919876543210', input);
+      await service.sendTemplateTo('919876543210', input);
+      expect(listTemplates).toHaveBeenCalledTimes(1);
+    });
+
+    it('keys failed rows uniquely, even for the same number in the same instant', async () => {
+      jest.useFakeTimers({ now: new Date('2026-10-01T10:00:00Z') });
+      try {
+        sendTemplate.mockRejectedValue(new Error('graph down'));
+        const input = { name: 'order_dispatched', language: 'en' };
+        await service.sendTemplateTo('919876543210', input).catch(() => null);
+        await service.sendTemplateTo('919876543210', input).catch(() => null);
+      } finally {
+        jest.useRealTimers();
+      }
+      const ids = create.mock.calls.map(
+        (c) => (c as [{ waMessageId: string }])[0].waMessageId,
+      );
+      expect(ids).toHaveLength(2);
+      expect(ids[0]).not.toBe(ids[1]);
+      expect(ids[0]).toMatch(/^failed-\d+-919876543210-/);
     });
 
     it('still sends when the template lookup fails', async () => {
@@ -270,7 +376,10 @@ describe('WhatsappService', () => {
       status: 'APPROVED',
       components: [
         { type: 'HEADER', format: 'IMAGE' },
-        { type: 'BODY', text: 'Hello {{customer_name}}, your {{kit_name}} shipped.' },
+        {
+          type: 'BODY',
+          text: 'Hello {{customer_name}}, your {{kit_name}} shipped.',
+        },
       ],
     };
 
@@ -351,7 +460,10 @@ describe('WhatsappService', () => {
         id: '1419053503494614',
         name: 'order_delivered',
         components: [
-          { type: 'BODY', text: 'Hello {{customer_name}}, your {{kit_name}} from {{client_brand}} arrived.' },
+          {
+            type: 'BODY',
+            text: 'Hello {{customer_name}}, your {{kit_name}} from {{client_brand}} arrived.',
+          },
         ],
       };
       getTemplateById.mockResolvedValueOnce(delivered);
@@ -413,6 +525,19 @@ describe('WhatsappService', () => {
       expect(created.text).toBe(
         'Hello Asha, your Welcome Kit from Mudgar Girl shipped. Tracking: EX123456789IN',
       );
+    });
+  });
+
+  describe('getSettings', () => {
+    it('creates the singleton with an upsert, so concurrent first reads cannot collide', async () => {
+      settingFindOne.mockResolvedValueOnce(null);
+      await service.getSettings();
+
+      const [filter, update, options] = settingFindOneAndUpdate.mock
+        .calls[0] as unknown as [unknown, unknown, Record<string, unknown>];
+      expect(filter).toEqual({ key: 'default' });
+      expect(update).toEqual({ $setOnInsert: { key: 'default' } });
+      expect(options).toMatchObject({ upsert: true });
     });
   });
 
@@ -503,6 +628,7 @@ describe('WhatsappService', () => {
 
     it('sends one acknowledgement when the claim is won', async () => {
       await service.handleEvent(textPayload);
+      await flush();
 
       expect(sendText).toHaveBeenCalledTimes(1);
       const [to, body] = sendText.mock.calls[0] as [string, string];
@@ -513,6 +639,7 @@ describe('WhatsappService', () => {
     it('stays silent when the auto-reply is switched off', async () => {
       settings.autoReplyEnabled = false;
       await service.handleEvent(textPayload);
+      await flush();
       expect(sendText).not.toHaveBeenCalled();
     });
 
@@ -522,6 +649,7 @@ describe('WhatsappService', () => {
       settings.openDays = [];
 
       await service.handleEvent(textPayload);
+      await flush();
 
       const [, body] = sendText.mock.calls[0] as [string, string];
       expect(body).toBe(settings.afterHoursText);
@@ -531,24 +659,42 @@ describe('WhatsappService', () => {
       // No document back = the conditional update matched nothing = already sent.
       findOneAndUpdate.mockResolvedValueOnce(null);
       await service.handleEvent(textPayload);
+      await flush();
       expect(sendText).not.toHaveBeenCalled();
     });
 
     it('does not acknowledge a redelivered message', async () => {
       updateOne.mockResolvedValueOnce({ upsertedCount: 0 });
       await service.handleEvent(textPayload);
+      await flush();
       expect(sendText).not.toHaveBeenCalled();
     });
 
     it('releases the claim when the acknowledgement fails to send', async () => {
       sendText.mockRejectedValueOnce(new Error('graph down'));
       await service.handleEvent(textPayload);
+      await flush();
 
       // Last conversation write clears ackSentAt so the next message retries.
       const calls = conversationUpdateOne.mock.calls as Array<
         [unknown, Record<string, unknown>]
       >;
       expect(calls[calls.length - 1][1]).toEqual({ $unset: { ackSentAt: 1 } });
+    });
+
+    it('acks Meta without waiting for the acknowledgement send', async () => {
+      // A Graph call that never returns must not hold the webhook response.
+      sendText.mockReturnValueOnce(new Promise(() => undefined));
+      await expect(service.handleEvent(textPayload)).resolves.toBeUndefined();
+      // The inbound message itself was stored before returning.
+      expect(updateOne).toHaveBeenCalledTimes(1);
+    });
+
+    it('logs, rather than surfaces, an acknowledgement that blows up', async () => {
+      settingFindOne.mockRejectedValueOnce(new Error('mongo down'));
+      await expect(service.handleEvent(textPayload)).resolves.toBeUndefined();
+      await flush();
+      expect(sendText).not.toHaveBeenCalled();
     });
 
     it('swallows a storage failure so Meta still gets its 200', async () => {

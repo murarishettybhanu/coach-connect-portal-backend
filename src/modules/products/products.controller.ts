@@ -22,6 +22,8 @@ import {
 } from './dto/inventory.dto';
 import { UpdateStoreSettingsDto } from './dto/update-store-settings.dto';
 import { TribesService } from '../tribes/tribes.service';
+import { CurrentUserId } from '../../common/decorators/current-user.decorator';
+import { assertOwnedBy } from '../../common/utils/ownership';
 
 // Stock shortfalls (negative stock) are for the admin only: everyone else sees
 // stock floored at zero.
@@ -62,12 +64,20 @@ export class ProductsController {
     return this.productsService.create(productData);
   }
 
+  // A tribe sees only its own live products: its coachId is forced, whatever
+  // the query says, and `deleted` is admin-only.
   @Get()
+  @Roles(UserRole.ADMIN, UserRole.TRIBE)
   async findAll(
     @Request() req: any,
+    @CurrentUserId() userId: string,
     @Query('coachId') coachId?: string,
     @Query('deleted') deleted?: string,
   ) {
+    if (req.user.role !== UserRole.ADMIN) {
+      const tribeId = await this.tribesService.findIdByUserId(userId);
+      return forRole(req, await this.productsService.findByCoach(tribeId));
+    }
     if (coachId) {
       // `?deleted=true` returns only the coach's soft-deleted products so the
       // admin can review and recover them.
@@ -90,8 +100,18 @@ export class ProductsController {
   }
 
   @Get(':id')
-  async findOne(@Request() req: any, @Param('id') id: string) {
-    return forRole(req, await this.productsService.findOne(id));
+  @Roles(UserRole.ADMIN, UserRole.TRIBE)
+  async findOne(
+    @Request() req: any,
+    @CurrentUserId() userId: string,
+    @Param('id') id: string,
+  ) {
+    const product = await this.productsService.findOne(id);
+    if (req.user.role !== UserRole.ADMIN) {
+      const tribeId = await this.tribesService.findIdByUserId(userId);
+      assertOwnedBy(product.coachId, tribeId, 'Not authorized to view this product');
+    }
+    return forRole(req, product);
   }
 
   // Set per-size stock (split Unassigned into sizes and/or correct to a count).
@@ -119,13 +139,11 @@ export class ProductsController {
     @Param('id') id: string,
     @Body() dto: UpdateStoreSettingsDto,
     @Request() req: any,
+    @CurrentUserId() userId: string,
   ) {
     let coachId: string | undefined;
     if (req.user.role === UserRole.TRIBE) {
-      const coach = await this.tribesService.findByUserId(
-        req.user.userId || req.user.sub || req.user._id,
-      );
-      coachId = coach._id;
+      coachId = await this.tribesService.findIdByUserId(userId);
     }
     return this.productsService.updateStoreSettings(id, dto, coachId);
   }

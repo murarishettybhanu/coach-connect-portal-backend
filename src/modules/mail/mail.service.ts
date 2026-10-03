@@ -25,6 +25,11 @@ export class MailService {
         port: Number(this.config.get('MAIL_PORT') || 587),
         secure: String(this.config.get('MAIL_SECURE')) === 'true',
         auth: { user, pass },
+        // Without these a hung SMTP connection holds the request that sent
+        // the mail (tribe creation) open indefinitely.
+        connectionTimeout: 10_000,
+        greetingTimeout: 10_000,
+        socketTimeout: 10_000,
       });
     } else {
       this.logger.warn(
@@ -91,14 +96,20 @@ export class MailService {
       this.logger.log(`Sent welcome email to ${email}`);
       return true;
     } catch (e: any) {
-      this.logger.error(`Failed to send welcome email to ${email}: ${e.message}`);
+      this.logger.error(
+        `Failed to send welcome email to ${email}: ${e.message}`,
+      );
       return false;
     }
   }
 }
 
 function escapeHtml(s: string): string {
-  return String(s ?? '').replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string),
+  return String(s ?? '').replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[
+        c
+      ] as string,
   );
 }

@@ -4,6 +4,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Order, OrderStatus } from '../../schemas/order.schema';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
+import { JobRun, claimJobWindow } from './job-run.schema';
 import { titleCaseName } from '../../common/utils/name.util';
 
 /** Meta template `order_dispach_update_for_tribe_owner`. */
@@ -67,11 +68,21 @@ export class DispatchDigestService {
   constructor(
     @InjectModel(Order.name) private readonly orderModel: Model<Order>,
     private readonly whatsapp: WhatsappService,
+    @InjectModel(JobRun.name)
+    private readonly jobRunModel?: Model<JobRun>,
   ) {}
 
   @Cron('0 21 * * *', { name: 'dispatch-digest', timeZone: TIMEZONE })
   async runNightly(): Promise<void> {
     const { start, end } = this.windowEndingAt(new Date());
+    // Once per window: a second firing (another replica, a restart at the
+    // cut-off) finds the window already claimed and sends nothing.
+    if (!(await claimJobWindow(this.jobRunModel, 'dispatch-digest', start, end))) {
+      this.logger.warn(
+        `dispatch-digest for the window ending ${end.toISOString()} already ran — skipping`,
+      );
+      return;
+    }
     await this.run(start, end);
   }
 

@@ -2,7 +2,6 @@ import {
   Injectable,
   Logger,
   BadGatewayException,
-  BadRequestException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 
@@ -147,8 +146,13 @@ export class IndiaPostApiService {
         { method: 'POST', body: { bulk: chunk } },
       );
       if (body.success === false) {
+        // Their message is logged, not echoed: upstream wording isn't ours to
+        // show, and can describe their internals.
+        this.logger.error(
+          `India Post tracking rejected: ${body.message ?? '(no message)'}`,
+        );
         throw new BadGatewayException(
-          body.message || 'India Post rejected the tracking request',
+          'India Post rejected the tracking request',
         );
       }
       results.push(...(body.data ?? []));
@@ -187,7 +191,7 @@ export class IndiaPostApiService {
     } catch (err) {
       const reason = (err as Error).message;
       this.logger.error(`India Post login failed: ${reason}`);
-      throw new BadGatewayException(`India Post unreachable: ${reason}`);
+      throw new BadGatewayException('India Post is unreachable right now');
     }
 
     const text = await res.text();
@@ -208,7 +212,7 @@ export class IndiaPostApiService {
         ? new ServiceUnavailableException(
             'India Post rejected our credentials — check INDIAPOST_USERNAME / INDIAPOST_PASSWORD',
           )
-        : new BadGatewayException(`India Post login failed: ${detail}`);
+        : new BadGatewayException('India Post login failed');
     }
 
     const ttl = Number(parsed.data?.expires_in) || DEFAULT_TOKEN_TTL_S;
@@ -240,7 +244,7 @@ export class IndiaPostApiService {
     } catch (err) {
       const reason = (err as Error).message;
       this.logger.error(`India Post ${path} failed: ${reason}`);
-      throw new BadGatewayException(`India Post unreachable: ${reason}`);
+      throw new BadGatewayException('India Post is unreachable right now');
     }
 
     // A token can lapse between the expiry check and the call landing; log in
@@ -269,9 +273,13 @@ export class IndiaPostApiService {
         text.slice(0, 300) ||
         `HTTP ${res.status}`;
       this.logger.error(`India Post ${path} → ${res.status}: ${detail}`);
-      throw res.status >= 400 && res.status < 500
-        ? new BadRequestException(detail)
-        : new BadGatewayException(detail);
+      // Numbers are validated before they get here, so any upstream rejection
+      // is India Post's side or our credentials — never the caller's request.
+      throw res.status === 401 || res.status === 403
+        ? new ServiceUnavailableException(
+            'India Post rejected our credentials — tracking is unavailable',
+          )
+        : new BadGatewayException('India Post tracking request failed');
     }
 
     return parsed as T;

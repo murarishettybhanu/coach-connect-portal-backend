@@ -5,15 +5,24 @@ import {
   IsEnum,
   IsMongoId,
   IsNotEmpty,
+  IsInt,
   IsNumber,
   IsOptional,
   IsString,
+  Max,
+  MaxLength,
   Min,
   ValidateNested,
+  ArrayMaxSize,
   ArrayMinSize,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { OrderType } from '../../../schemas/order.schema';
+
+// Sanity caps for a public endpoint. A claim is one of each kit product and a
+// storefront basket is a handful of lines; nothing legitimate comes near these.
+export const MAX_ORDER_ITEMS = 50;
+export const MAX_ITEM_QUANTITY = 100;
 
 // Address block for ORDER CREATE. Only contact (fullName + phone) is mandatory here,
 // because "without address" campaign claims omit the address entirely (it's attached
@@ -74,8 +83,9 @@ export class OrderItemDto {
   @IsMongoId()
   productId: string;
 
-  @IsNumber()
+  @IsInt()
   @Min(1)
+  @Max(MAX_ITEM_QUANTITY)
   quantity: number;
 
   @IsOptional()
@@ -88,8 +98,11 @@ export class OrderItemDto {
   @IsString()
   customizationType?: string;
 
+  // For PHOTO this is the uploaded image's URL, which must be in our own
+  // bucket — checked in OrdersService.create.
   @IsOptional()
   @IsString()
+  @MaxLength(2048)
   customizationValue?: string;
 }
 
@@ -127,6 +140,7 @@ export class CreateOrderDto {
 
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayMaxSize(MAX_ORDER_ITEMS)
   @ValidateNested({ each: true })
   @Type(() => OrderItemDto)
   items: OrderItemDto[];

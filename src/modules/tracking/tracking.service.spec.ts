@@ -1,5 +1,9 @@
 import { BadRequestException } from '@nestjs/common';
+import type { Model } from 'mongoose';
 import { TrackingService } from './tracking.service';
+import { Order } from '../../schemas/order.schema';
+import { Tribe } from '../../schemas/tribe.schema';
+import { UserRole } from '../../schemas/user.schema';
 import {
   IndiaPostApiService,
   IndiaPostArticle,
@@ -53,11 +57,32 @@ const SAMPLE: IndiaPostArticle = {
   del_status: { del_status: 'not delivered' },
 };
 
-function makeService(articles: IndiaPostArticle[]) {
+/** A Mongoose-style chain ending in `.exec()`, resolving to `result`. */
+function query(result: unknown) {
+  const chain = {
+    select: jest.fn(() => chain),
+    lean: jest.fn(() => chain),
+    exec: jest.fn().mockResolvedValue(result),
+  };
+  return chain;
+}
+
+function makeService(
+  articles: IndiaPostArticle[],
+  opts: { tribe?: unknown; orders?: Array<{ trackingNumber?: string }> } = {},
+) {
   const api = { trackBulk: jest.fn().mockResolvedValue(articles) };
+  const orderModel = { find: jest.fn(() => query(opts.orders ?? [])) };
+  const tribeModel = { findOne: jest.fn(() => query(opts.tribe ?? null)) };
   return {
-    service: new TrackingService(api as unknown as IndiaPostApiService),
+    service: new TrackingService(
+      api as unknown as IndiaPostApiService,
+      orderModel as unknown as Model<Order>,
+      tribeModel as unknown as Model<Tribe>,
+    ),
     api,
+    orderModel,
+    tribeModel,
   };
 }
 
@@ -312,5 +337,84 @@ describe('TrackingService — live API shapes', () => {
     expect(result.found).toBe(true);
     expect(result.delivered).toBe(true);
     expect(result.bookedAt).toBe('2025-06-25T13:35:26Z');
+  });
+});
+
+describe('TrackingService ownership (trackManyFor)', () => {
+  const tribeUser = { _id: 'user-1', role: UserRole.TRIBE };
+  const tribe = { _id: 'tribe-1' };
+
+  it('lets an admin track any number', async () => {
+    const { service, api, orderModel } = makeService([SAMPLE]);
+    const [result] = await service.trackManyFor(
+      { _id: 'admin', role: UserRole.ADMIN },
+      ['RK775227016IN'],
+    );
+
+    expect(result.found).toBe(true);
+    expect(api.trackBulk).toHaveBeenCalledWith(['RK775227016IN']);
+    expect(orderModel.find).not.toHaveBeenCalled();
+  });
+
+  it("tracks a tribe's own order numbers, scoped to its own orders", async () => {
+    const { service, api, orderModel, tribeModel } = makeService([SAMPLE], {
+      tribe,
+      // Stored as typed at dispatch — lowercase, padded.
+      orders: [{ trackingNumber: ' rk775227016in ' }],
+    });
+    const [result] = await service.trackManyFor(tribeUser, ['RK775227016IN']);
+
+    expect(result.found).toBe(true);
+    expect(tribeModel.findOne).toHaveBeenCalledWith({ userId: 'user-1' });
+    const [filter] = orderModel.find.mock.calls[0] as unknown as [
+      { coachId: unknown },
+    ];
+    expect(filter.coachId).toBe('tribe-1');
+    expect(api.trackBulk).toHaveBeenCalledWith(['RK775227016IN']);
+  });
+
+  it("answers another tribe's number as not found, without asking India Post", async () => {
+    const { service, api } = makeService([SAMPLE], { tribe, orders: [] });
+    const [result] = await service.trackManyFor(tribeUser, ['RK775227016IN']);
+
+    expect(result.found).toBe(false);
+    expect(result.consignmentNumber).toBe('RK775227016IN');
+    expect(api.trackBulk).not.toHaveBeenCalled();
+  });
+
+  it('sends only the owned numbers upstream and keeps the order asked for', async () => {
+    const { service, api } = makeService([SAMPLE], {
+      tribe,
+      orders: [{ trackingNumber: 'RK775227016IN' }],
+    });
+    const results = await service.trackManyFor(tribeUser, [
+      'EN455305586IN',
+      'RK775227016IN',
+    ]);
+
+    expect(api.trackBulk).toHaveBeenCalledWith(['RK775227016IN']);
+    expect(results.map((r) => [r.consignmentNumber, r.found])).toEqual([
+      ['EN455305586IN', false],
+      ['RK775227016IN', true],
+    ]);
+  });
+
+  it('treats a tribe user with no tribe profile as owning nothing', async () => {
+    const { service, api, orderModel } = makeService([SAMPLE]);
+    const [result] = await service.trackManyFor(tribeUser, ['RK775227016IN']);
+
+    expect(result.found).toBe(false);
+    expect(orderModel.find).not.toHaveBeenCalled();
+    expect(api.trackBulk).not.toHaveBeenCalled();
+  });
+
+  it('gives any other role nothing', async () => {
+    const { service, api } = makeService([SAMPLE]);
+    const [result] = await service.trackManyFor(
+      { _id: 'c', role: UserRole.CUSTOMER },
+      ['RK775227016IN'],
+    );
+    expect(result.found).toBe(false);
+    expect(api.trackBulk).not.toHaveBeenCalled();
   });
 });
