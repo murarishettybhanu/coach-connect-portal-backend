@@ -7,6 +7,7 @@ import {
   MaxLength,
 } from 'class-validator';
 import { EnquiryStatus } from '../../../schemas/enquiry.schema';
+import { TitleCaseName } from '../../../common/decorators/title-case-name.decorator';
 
 // Public form — every field is capped so an anonymous caller can't park
 // megabytes of text in the admin inbox.
@@ -14,6 +15,7 @@ export class CreateEnquiryDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(120)
+  @TitleCaseName()
   name: string;
 
   @IsEmail()

@@ -8,6 +8,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { TitleCaseName } from '../../../common/decorators/title-case-name.decorator';
 
 // A COMPLETE delivery address — used when attaching an address to an existing
 // "without address" claim (step-2 page or bulk upload). Unlike the create-time
@@ -15,6 +16,7 @@ import { Type } from 'class-transformer';
 export class FullAddressDto {
   @IsNotEmpty()
   @IsString()
+  @TitleCaseName()
   fullName: string;
 
   @IsNotEmpty()
@@ -98,6 +100,7 @@ export class AttachAddressDto {
 export class UpdateAddressDto {
   @IsOptional()
   @IsString()
+  @TitleCaseName()
   fullName?: string;
 
   @IsNotEmpty()

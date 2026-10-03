@@ -18,6 +18,7 @@ import {
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { OrderType } from '../../../schemas/order.schema';
+import { TitleCaseName } from '../../../common/decorators/title-case-name.decorator';
 
 // Sanity caps for a public endpoint. A claim takes exactly its campaign's
 // quantities (checked in OrdersService.create) and a storefront basket is a
@@ -32,6 +33,7 @@ export const MAX_ITEM_QUANTITY = 100;
 export class ShippingAddressDto {
   @IsNotEmpty()
   @IsString()
+  @TitleCaseName()
   fullName: string;
 
   @IsOptional()

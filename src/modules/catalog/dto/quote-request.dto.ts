@@ -14,6 +14,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { RequestStatus } from '../../../schemas/quote-request.schema';
+import { TitleCaseName } from '../../../common/decorators/title-case-name.decorator';
 
 // Bounds for the public estimation form: a kit is a handful of products, and
 // even a large corporate run stays well under these.
@@ -34,6 +35,7 @@ export class GuestEstimationDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(120)
+  @TitleCaseName()
   name: string;
 
   @IsString()
