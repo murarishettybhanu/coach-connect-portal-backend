@@ -472,7 +472,9 @@ describe('OrdersService.findAllPaginated tribe filter', () => {
   });
 
   it('rejects a malformed id instead of matching nothing', async () => {
-    await expect(run(`${TRIBE_ID},nope`)).rejects.toBeInstanceOf(BadRequestException);
+    await expect(run(`${TRIBE_ID},nope`)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
   });
 });
 
@@ -484,9 +486,24 @@ describe('OrdersService.create — campaign quantities and kit pricing', () => {
   const KIT_ID = new Types.ObjectId().toString();
   // P1: cost 100 / retail 300; P2: cost 50 / retail 120; P3: cost 10 / retail 0.
   const catalog: Record<string, any> = {
-    [P1]: { _id: P1, coachId: TRIBE_ID, baseProductionCost: 100, retailPrice: 300 },
-    [P2]: { _id: P2, coachId: TRIBE_ID, baseProductionCost: 50, retailPrice: 120 },
-    [P3]: { _id: P3, coachId: TRIBE_ID, baseProductionCost: 10, retailPrice: 0 },
+    [P1]: {
+      _id: P1,
+      coachId: TRIBE_ID,
+      baseProductionCost: 100,
+      retailPrice: 300,
+    },
+    [P2]: {
+      _id: P2,
+      coachId: TRIBE_ID,
+      baseProductionCost: 50,
+      retailPrice: 120,
+    },
+    [P3]: {
+      _id: P3,
+      coachId: TRIBE_ID,
+      baseProductionCost: 10,
+      retailPrice: 0,
+    },
   };
 
   function campaignSetup(campaign: any, deleted: string[] = []) {
@@ -496,7 +513,12 @@ describe('OrdersService.create — campaign quantities and kit pricing', () => {
       return { ...catalog[id], isDeleted: deleted.includes(id) };
     });
     ctx.campaignModel.findById.mockReturnValue(
-      query({ _id: CAMPAIGN_ID, coachId: TRIBE_ID, status: 'ACTIVE', ...campaign }),
+      query({
+        _id: CAMPAIGN_ID,
+        coachId: TRIBE_ID,
+        status: 'ACTIVE',
+        ...campaign,
+      }),
     );
     ctx.orderModel.save.mockImplementation(function (this: any) {
       return Promise.resolve(this);
@@ -526,7 +548,9 @@ describe('OrdersService.create — campaign quantities and kit pricing', () => {
       claim([line(P1, 1, 'M'), line(P1, 1, 'L'), line(P2, 1)]),
       { trusted: true },
     );
-    expect(order.items.map((i: any) => [i.quantity, i.customizationValue])).toEqual([
+    expect(
+      order.items.map((i: any) => [i.quantity, i.customizationValue]),
+    ).toEqual([
       [1, 'M'],
       [1, 'L'],
       [1, undefined],
@@ -544,9 +568,9 @@ describe('OrdersService.create — campaign quantities and kit pricing', () => {
     ['an extra product', [line(P1, 2), line(P2, 1), line(P3, 1)]],
   ])('refuses %s, before any stock moves', async (_label, items) => {
     const { service, products } = campaignSetup(kitCampaign);
-    await expect(service.create(claim(items), { trusted: true })).rejects.toThrow(
-      "Quantities don't match this campaign",
-    );
+    await expect(
+      service.create(claim(items), { trusted: true }),
+    ).rejects.toThrow("Quantities don't match this campaign");
     expect(products.decrementStock).not.toHaveBeenCalled();
   });
 
@@ -556,13 +580,20 @@ describe('OrdersService.create — campaign quantities and kit pricing', () => {
       service.create({
         ...claim([line(P1, 5), line(P2, 1)]),
         otpToken: 'proof',
-        shippingAddress: { ...storeOrder.shippingAddress, landmark: 'x', sectorVillage: 'y' },
+        shippingAddress: {
+          ...storeOrder.shippingAddress,
+          landmark: 'x',
+          sectorVillage: 'y',
+        },
       }),
     ).rejects.toThrow("Quantities don't match this campaign");
   });
 
   it('reads legacy campaign lines (no quantity) as 1', async () => {
-    const legacy = { type: OrderType.WELCOME_KIT, products: [{ productId: P1 }, { productId: P2 }] };
+    const legacy = {
+      type: OrderType.WELCOME_KIT,
+      products: [{ productId: P1 }, { productId: P2 }],
+    };
     let ctx = campaignSetup(legacy);
     await expect(
       ctx.service.create(claim([line(P1, 1), line(P2, 1)]), { trusted: true }),
@@ -590,7 +621,8 @@ describe('OrdersService.create — campaign quantities and kit pricing', () => {
     ],
     ...extra,
   });
-  const sum = (ns: number[]) => Math.round(ns.reduce((a, b) => a + b, 0) * 100) / 100;
+  const sum = (ns: number[]) =>
+    Math.round(ns.reduce((a, b) => a + b, 0) * 100) / 100;
   const twoDp = (n: number) => Math.round(n * 100) / 100 === n;
 
   it('charges the kit price, split over lines that sum to it exactly', async () => {
@@ -610,7 +642,9 @@ describe('OrdersService.create — campaign quantities and kit pricing', () => {
     expect(sum(commissions)).toBe(750.01);
     expect([...amounts, ...commissions].every(twoDp)).toBe(true);
     // Weighted by retail value: 300 : 300 : 120.
-    expect(order.items.map((i: any) => i.retailPrice)).toEqual([416.67, 416.67, 166.67]);
+    expect(order.items.map((i: any) => i.retailPrice)).toEqual([
+      416.67, 416.67, 166.67,
+    ]);
     expect(transactions.create).toHaveBeenCalledWith(
       expect.objectContaining({ amount: 750.01 }),
     );
@@ -642,12 +676,17 @@ describe('OrdersService.create — campaign quantities and kit pricing', () => {
     const { service } = campaignSetup(
       kitSale({ kitPrice: 100, products: [{ productId: P3, quantity: 3 }] }),
     );
-    const order: any = await service.create(claim([line(P3, 1, 'S'), line(P3, 2, 'M')]), {
-      trusted: true,
-    });
+    const order: any = await service.create(
+      claim([line(P3, 1, 'S'), line(P3, 2, 'M')]),
+      {
+        trusted: true,
+      },
+    );
     // 33.33 + 2 × 33.33 leaves a paisa; it lands on the single-unit line.
     expect(order.items.map((i: any) => i.retailPrice)).toEqual([33.34, 33.33]);
-    expect(sum(order.items.map((i: any) => i.retailPrice * i.quantity))).toBe(100);
+    expect(sum(order.items.map((i: any) => i.retailPrice * i.quantity))).toBe(
+      100,
+    );
     expect(order.totalCommission).toBe(70);
     expect(sum(order.items.map((i: any) => i.commission))).toBe(70);
   });
@@ -679,7 +718,9 @@ describe('OrdersService — tribe member hooks', () => {
     const { service, orderModel, members } = setup();
     const saved = { _id: new Types.ObjectId() };
     orderModel.save.mockResolvedValue(saved);
-    await expect(service.create({ ...storeOrder, items: [item()] })).resolves.toBe(saved);
+    await expect(
+      service.create({ ...storeOrder, items: [item()] }),
+    ).resolves.toBe(saved);
     expect(members.recordOrder).toHaveBeenCalledWith(saved);
   });
 
@@ -688,13 +729,17 @@ describe('OrdersService — tribe member hooks', () => {
     const saved = { _id: new Types.ObjectId() };
     orderModel.save.mockResolvedValue(saved);
     members.recordOrder.mockRejectedValue(new Error('members down'));
-    await expect(service.create({ ...storeOrder, items: [item()] })).resolves.toBe(saved);
+    await expect(
+      service.create({ ...storeOrder, items: [item()] }),
+    ).resolves.toBe(saved);
   });
 
   it('does not record a member for an order that failed to save', async () => {
     const { service, orderModel, members } = setup();
     orderModel.save.mockRejectedValue(new Error('db down'));
-    await expect(service.create({ ...storeOrder, items: [item()] })).rejects.toThrow('db down');
+    await expect(
+      service.create({ ...storeOrder, items: [item()] }),
+    ).rejects.toThrow('db down');
     expect(members.recordOrder).not.toHaveBeenCalled();
   });
 
@@ -748,13 +793,20 @@ describe('OrdersService — tribe member hooks', () => {
   it('a failing member sync never fails a delete or restore', async () => {
     const { service, orderModel, members, transactions } = setup();
     members.recordOrder.mockRejectedValue(new Error('members down'));
-    const pre = { _id: ORDER_ID, status: OrderStatus.DELIVERED, items: [], totalCommission: 0 };
+    const pre = {
+      _id: ORDER_ID,
+      status: OrderStatus.DELIVERED,
+      items: [],
+      totalCommission: 0,
+    };
     orderModel.findOneAndUpdate.mockReturnValue(query(pre));
     await expect(service.deleteOrder(ORDER_ID)).resolves.toBeUndefined();
     expect(transactions.reverseByOrder).toHaveBeenCalled();
 
     orderModel.findOne.mockReturnValue(query({ _id: ORDER_ID }));
-    await expect(service.restoreOrder(ORDER_ID)).resolves.toEqual({ _id: ORDER_ID });
+    await expect(service.restoreOrder(ORDER_ID)).resolves.toEqual({
+      _id: ORDER_ID,
+    });
     expect(members.recordOrder).toHaveBeenCalledTimes(2);
   });
 
@@ -774,5 +826,86 @@ describe('OrdersService — tribe member hooks', () => {
     orderModel.save.mockResolvedValue(replacement);
     await expect(service.reorderReturned(ORDER_ID)).resolves.toBe(replacement);
     expect(members.recordOrder).toHaveBeenCalledWith(replacement);
+  });
+});
+
+describe('OrdersService repeat claims', () => {
+  const MEMBER = new Types.ObjectId();
+  const CAMP = new Types.ObjectId();
+  const at = (d: number) => new Date(Date.UTC(2026, 9, d));
+  const claim = (id: string, d: number, extra: any = {}) => ({
+    _id: id,
+    memberId: MEMBER,
+    campaignId: CAMP,
+    createdAt: at(d),
+    status: 'NEW',
+    ...extra,
+  });
+
+  it('lists the same customer’s earlier claims on the same campaign — never later ones or itself', async () => {
+    const { service, orderModel } = setup();
+    const first = claim('a1', 1);
+    const second = claim('a2', 2);
+    const third = claim('a3', 3, { approvalStatus: 'PENDING' });
+    orderModel.find.mockReturnValue(query([first, second, third]));
+
+    const [o1, o2, o3] = await service.withPriorClaims([
+      first,
+      second,
+      { ...third, campaignId: { _id: CAMP, name: 'Kit' } }, // populated ref
+    ]);
+    expect(o1.priorClaims).toEqual([]);
+    expect(o2.priorClaims.map((c: any) => c._id)).toEqual(['a1']);
+    expect(o3.priorClaims.map((c: any) => c._id)).toEqual(['a1', 'a2']);
+
+    // Deleted and rejected claims are left out by the lookup itself.
+    const [filter] = orderModel.find.mock.calls[0];
+    expect(filter).toMatchObject({
+      isDeleted: { $ne: true },
+      approvalStatus: { $ne: 'REJECTED' },
+    });
+  });
+
+  it('gives store sales and unlinked orders an empty list without a lookup', async () => {
+    const { service, orderModel } = setup();
+    const [o] = await service.withPriorClaims([
+      { _id: 'x', memberId: MEMBER, createdAt: at(1) },
+    ]);
+    expect(o.priorClaims).toEqual([]);
+    expect(orderModel.find).not.toHaveBeenCalled();
+  });
+
+  it('wraps a paginated result', async () => {
+    const { service, orderModel } = setup();
+    orderModel.find.mockReturnValue(query([]));
+    const page = await service.withPriorClaimsPage({
+      data: [claim('a1', 1)],
+      total: 1,
+    });
+    expect(page.total).toBe(1);
+    expect(page.data[0].priorClaims).toEqual([]);
+  });
+
+  it('claim check needs a WhatsApp proof for the number, then matches any phone format', async () => {
+    const { service, orderModel, otp } = setup();
+    otp.checkProof.mockReturnValue({ ok: false });
+    await expect(
+      service.claimCheck(String(CAMP), '9876543210', 'tok'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.claimCheck(String(CAMP), '9876543210'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    otp.checkProof.mockReturnValue({ ok: true });
+    orderModel.find.mockReturnValue(
+      query([
+        { shippingAddress: { phone: '+91 98765 43210' } },
+        { shippingAddress: { phone: '9000000000' } },
+      ]),
+    );
+    await expect(
+      service.claimCheck(String(CAMP), '9876543210', 'tok'),
+    ).resolves.toEqual({ alreadyClaimed: true, count: 1 });
+    expect(otp.checkProof).toHaveBeenLastCalledWith('tok', '9876543210');
   });
 });

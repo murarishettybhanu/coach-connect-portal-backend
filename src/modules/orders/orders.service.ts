@@ -10,6 +10,7 @@ import { Model, Types, isValidObjectId } from 'mongoose';
 import type { Response } from 'express';
 import archiver = require('archiver');
 import { Order, OrderStatus, OrderType, ApprovalStatus } from '../../schemas/order.schema';
+import { refIdOf } from '../../common/utils/ownership';
 import { Campaign, CampaignFormType } from '../../schemas/campaign.schema';
 import { TribeKit } from '../../schemas/tribe-kit.schema';
 import { allocate, allocateUnitPrices, roundMoney } from '../../common/kit-pricing';
@@ -87,6 +88,12 @@ const lineQuantity = (item: any): number =>
 // The size a stored order line was claimed in, so its stock moves in that size.
 const sizeOf = (item: any): string | undefined =>
   item?.customizationType === 'SIZE' ? item.customizationValue : undefined;
+
+// A phone number's last 10 digits — how orders, members and WhatsApp ids agree.
+const phoneKeyOf = (v: unknown): string =>
+  String(v ?? '')
+    .replace(/\D/g, '')
+    .slice(-10);
 
 @Injectable()
 export class OrdersService {
@@ -420,6 +427,91 @@ export class OrdersService {
       alternatePhone: incoming.alternatePhone || e.alternatePhone,
       email: incoming.email || e.email,
     };
+  }
+
+  /**
+   * Public, after WhatsApp verification: has this number already claimed from
+   * this campaign? The claim form warns the customer but still lets them
+   * submit. Asking needs a proof token for the number, so it can't be used to
+   * find out who has claimed.
+   */
+  async claimCheck(campaignId: string, phone: string, otpToken?: string) {
+    const key = phoneKeyOf(phone);
+    if (!otpToken || !this.otpService.checkProof(otpToken, key).ok) {
+      throw new BadRequestException('Verify your WhatsApp number first');
+    }
+    if (!isValidObjectId(campaignId) || key.length !== 10) {
+      return { alreadyClaimed: false, count: 0 };
+    }
+    const claims = await this.orderModel
+      .find({
+        campaignId,
+        isDeleted: { $ne: true },
+        approvalStatus: { $ne: ApprovalStatus.REJECTED },
+      } as any)
+      .select('shippingAddress.phone')
+      .lean()
+      .exec();
+    const count = claims.filter(
+      (o: any) => phoneKeyOf(o.shippingAddress?.phone) === key,
+    ).length;
+    return { alreadyClaimed: count > 0, count };
+  }
+
+  /**
+   * Adds `priorClaims` to each campaign order: the same customer's earlier
+   * claims on the same campaign (same tribe member, i.e. tribe + phone), not
+   * deleted or rejected — what the "already claimed" alert lists. Returns
+   * plain objects; used only on the way out of read endpoints.
+   */
+  async withPriorClaims(orders: any[]): Promise<any[]> {
+    const plain = orders.map((o) => (o?.toObject ? o.toObject() : o));
+    const claims = plain.filter((o) => o?.campaignId && o?.memberId);
+    const keyOf = (o: any) => `${refIdOf(o.memberId)}|${refIdOf(o.campaignId)}`;
+    const groups = new Map<string, any[]>();
+    if (claims.length) {
+      const siblings = await this.orderModel
+        .find({
+          memberId: { $in: [...new Set(claims.map((o) => refIdOf(o.memberId)))] },
+          campaignId: { $in: [...new Set(claims.map((o) => refIdOf(o.campaignId)))] },
+          isDeleted: { $ne: true },
+          approvalStatus: { $ne: ApprovalStatus.REJECTED },
+        } as any)
+        .select('memberId campaignId createdAt status approvalStatus')
+        .lean()
+        .exec();
+      for (const s of siblings as any[]) {
+        const k = keyOf(s);
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k)!.push(s);
+      }
+    }
+    const earlier = (a: any, b: any) => {
+      const ta = new Date(a.createdAt).getTime();
+      const tb = new Date(b.createdAt).getTime();
+      return ta < tb || (ta === tb && String(a._id) < String(b._id));
+    };
+    for (const o of plain) {
+      if (!o) continue;
+      o.priorClaims =
+        o.campaignId && o.memberId
+          ? (groups.get(keyOf(o)) ?? [])
+              .filter((s) => String(s._id) !== String(o._id) && earlier(s, o))
+              .sort((a, b) => (earlier(a, b) ? -1 : 1))
+              .map((s) => ({
+                _id: String(s._id),
+                createdAt: s.createdAt,
+                status: s.status,
+                approvalStatus: s.approvalStatus ?? null,
+              }))
+          : [];
+    }
+    return plain;
+  }
+
+  /** `withPriorClaims` for a paginated result ({ data, total, ... }). */
+  async withPriorClaimsPage<T extends { data: any[] }>(page: T): Promise<T> {
+    return { ...page, data: await this.withPriorClaims(page.data) };
   }
 
   // Public: does an address-pending claim exist for this campaign + phone?

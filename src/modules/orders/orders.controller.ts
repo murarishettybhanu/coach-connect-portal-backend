@@ -100,24 +100,41 @@ export class OrdersController {
   @Roles(UserRole.TRIBE)
   async findMyOrders(@CurrentUserId() userId: string) {
     const tribeId = await this.tribesService.findIdByUserId(userId);
-    return this.ordersService.findByCoach(tribeId);
+    return this.ordersService.withPriorClaims(
+      await this.ordersService.findByCoach(tribeId),
+    );
   }
 
   @Get('pending-approvals')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.TRIBE)
   async findPendingApprovals(@Request() req, @CurrentUserId() userId: string) {
-    if (req.user.role === UserRole.TRIBE) {
-      const tribeId = await this.tribesService.findIdByUserId(userId);
-      return this.ordersService.findPendingApprovals(tribeId);
-    }
-    return this.ordersService.findPendingApprovals();
+    const tribeId =
+      req.user.role === UserRole.TRIBE
+        ? await this.tribesService.findIdByUserId(userId)
+        : undefined;
+    // Each claim carries `priorClaims`, so approvers see repeat claimants.
+    return this.ordersService.withPriorClaims(
+      await this.ordersService.findPendingApprovals(tribeId),
+    );
   }
 
   @Post()
   async create(@Body() orderData: CreateOrderDto, @Request() req) {
     const trusted = await this.isTrustedCaller(req, orderData.campaignId);
     return this.ordersService.create(orderData, { trusted });
+  }
+
+  // Public, after WhatsApp verification: has this number already claimed from
+  // this campaign? (The form warns, but still lets them submit.)
+  @Get('claim-check')
+  @Throttle({ default: { limit: 20, ttl: 60000 } })
+  claimCheck(
+    @Query('campaignId') campaignId: string,
+    @Query('phone') phone: string,
+    @Query('otpToken') otpToken?: string,
+  ) {
+    return this.ordersService.claimCheck(campaignId, phone, otpToken);
   }
 
   // Public: step-2 lookup — does an address-pending claim exist for this phone?
@@ -235,27 +252,29 @@ export class OrdersController {
   @Get()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
-  findAll() {
-    return this.ordersService.findAll();
+  async findAll() {
+    return this.ordersService.withPriorClaims(await this.ordersService.findAll());
   }
 
   @Get('paginated')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
-  findAllPaginated(
+  async findAllPaginated(
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('search') search?: string,
     @Query('status') status?: string,
     @Query('coachId') coachId?: string | string[],
   ) {
-    return this.ordersService.findAllPaginated({
-      page: page ? Number(page) : undefined,
-      limit: limit ? Number(limit) : undefined,
-      search,
-      status,
-      coachId,
-    });
+    return this.ordersService.withPriorClaimsPage(
+      await this.ordersService.findAllPaginated({
+        page: page ? Number(page) : undefined,
+        limit: limit ? Number(limit) : undefined,
+        search,
+        status,
+        coachId,
+      }),
+    );
   }
 
   @Get('tribe')
@@ -268,19 +287,21 @@ export class OrdersController {
   @Get('by-coach/:coachId')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
-  findByCoachPaginated(
+  async findByCoachPaginated(
     @Param('coachId') coachId: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('search') search?: string,
     @Query('status') status?: string,
   ) {
-    return this.ordersService.findByCoachPaginated(coachId, {
-      page: page ? Number(page) : undefined,
-      limit: limit ? Number(limit) : undefined,
-      search,
-      status,
-    });
+    return this.ordersService.withPriorClaimsPage(
+      await this.ordersService.findByCoachPaginated(coachId, {
+        page: page ? Number(page) : undefined,
+        limit: limit ? Number(limit) : undefined,
+        search,
+        status,
+      }),
+    );
   }
 
   @Get(':id')
@@ -292,7 +313,9 @@ export class OrdersController {
     @CurrentUserId() userId: string,
   ) {
     // Object-level authorization: a tribe may only read its own orders.
-    return this.assertOrderOwnership(id, req, userId);
+    const order = await this.assertOrderOwnership(id, req, userId);
+    const [withClaims] = await this.ordersService.withPriorClaims([order]);
+    return withClaims;
   }
 
   @Patch(':id/status')
