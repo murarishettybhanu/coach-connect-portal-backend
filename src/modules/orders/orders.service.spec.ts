@@ -72,6 +72,7 @@ function setup() {
   const kitModel: any = { findById: jest.fn(() => query(null)) };
   const otp = { checkProof: jest.fn().mockReturnValue({ ok: true }) };
   const whatsapp = { canSend: false, sendTemplateByIdTo: jest.fn() };
+  const members = { recordOrder: jest.fn().mockResolvedValue(null) };
 
   const service = new OrdersService(
     orderModel,
@@ -82,6 +83,7 @@ function setup() {
     otp as any,
     whatsapp as any,
     kitModel,
+    members as any,
   );
   return {
     service,
@@ -92,6 +94,7 @@ function setup() {
     barcodes,
     otp,
     kitModel,
+    members,
   };
 }
 
@@ -656,5 +659,120 @@ describe('OrdersService.create — campaign quantities and kit pricing', () => {
     });
     expect(order.totalAmount).toBe(720);
     expect(order.totalCommission).toBe(470);
+  });
+});
+
+describe('OrdersService — tribe member hooks', () => {
+  const claimDoc = (extra: any = {}) => {
+    const doc: any = {
+      _id: new Types.ObjectId(),
+      shippingAddress: { fullName: 'Ravi', phone: '9876543210' },
+      addressPending: true,
+      markModified: jest.fn(),
+      ...extra,
+    };
+    doc.save = jest.fn().mockResolvedValue(doc);
+    return doc;
+  };
+
+  it('records the member after a successful create', async () => {
+    const { service, orderModel, members } = setup();
+    const saved = { _id: new Types.ObjectId() };
+    orderModel.save.mockResolvedValue(saved);
+    await expect(service.create({ ...storeOrder, items: [item()] })).resolves.toBe(saved);
+    expect(members.recordOrder).toHaveBeenCalledWith(saved);
+  });
+
+  it('a failing member sync never fails the create', async () => {
+    const { service, orderModel, members } = setup();
+    const saved = { _id: new Types.ObjectId() };
+    orderModel.save.mockResolvedValue(saved);
+    members.recordOrder.mockRejectedValue(new Error('members down'));
+    await expect(service.create({ ...storeOrder, items: [item()] })).resolves.toBe(saved);
+  });
+
+  it('does not record a member for an order that failed to save', async () => {
+    const { service, orderModel, members } = setup();
+    orderModel.save.mockRejectedValue(new Error('db down'));
+    await expect(service.create({ ...storeOrder, items: [item()] })).rejects.toThrow('db down');
+    expect(members.recordOrder).not.toHaveBeenCalled();
+  });
+
+  it('records every order an attached address completes', async () => {
+    const { service, orderModel, members } = setup();
+    const a = claimDoc();
+    const b = claimDoc();
+    orderModel.find.mockReturnValue(query([a, b]));
+    const res = await service.attachAddressByPhone(
+      new Types.ObjectId().toString(),
+      '9876543210',
+      { addressLine1: '1 Road', city: 'Pune', state: 'MH', pincode: '411001' },
+      { trusted: true },
+    );
+    expect(res).toEqual({ updated: 2 });
+    expect(members.recordOrder).toHaveBeenCalledTimes(2);
+    expect(members.recordOrder).toHaveBeenCalledWith(a);
+    expect(members.recordOrder).toHaveBeenCalledWith(b);
+  });
+
+  it('records the member on PATCH address, and swallows a failure', async () => {
+    const { service, orderModel, members } = setup();
+    const doc = claimDoc();
+    orderModel.findById.mockReturnValue(query(doc));
+    members.recordOrder.mockRejectedValue(new Error('members down'));
+    await expect(
+      service.updateAddress(String(doc._id), {
+        addressLine1: '1 Road',
+        city: 'Pune',
+        state: 'MH',
+        pincode: '411001',
+      }),
+    ).resolves.toBe(doc);
+    expect(members.recordOrder).toHaveBeenCalledWith(doc);
+  });
+
+  it('records the member on delete, but not when the delete lost the race', async () => {
+    const { service, orderModel, members } = setup();
+    const pre = { _id: ORDER_ID, status: OrderStatus.DELIVERED, items: [] };
+    orderModel.findOneAndUpdate.mockReturnValue(query(pre));
+    await service.deleteOrder(ORDER_ID);
+    expect(members.recordOrder).toHaveBeenCalledWith(pre);
+
+    members.recordOrder.mockClear();
+    orderModel.findOneAndUpdate.mockReturnValue(query(null));
+    orderModel.exists.mockResolvedValue({ _id: ORDER_ID });
+    await service.deleteOrder(ORDER_ID);
+    expect(members.recordOrder).not.toHaveBeenCalled();
+  });
+
+  it('a failing member sync never fails a delete or restore', async () => {
+    const { service, orderModel, members, transactions } = setup();
+    members.recordOrder.mockRejectedValue(new Error('members down'));
+    const pre = { _id: ORDER_ID, status: OrderStatus.DELIVERED, items: [], totalCommission: 0 };
+    orderModel.findOneAndUpdate.mockReturnValue(query(pre));
+    await expect(service.deleteOrder(ORDER_ID)).resolves.toBeUndefined();
+    expect(transactions.reverseByOrder).toHaveBeenCalled();
+
+    orderModel.findOne.mockReturnValue(query({ _id: ORDER_ID }));
+    await expect(service.restoreOrder(ORDER_ID)).resolves.toEqual({ _id: ORDER_ID });
+    expect(members.recordOrder).toHaveBeenCalledTimes(2);
+  });
+
+  it('records the replacement order on reorder', async () => {
+    const { service, orderModel, members } = setup();
+    orderModel.findOneAndUpdate.mockReturnValue(
+      query({
+        _id: ORDER_ID,
+        coachId: TRIBE_ID,
+        status: OrderStatus.RETURNED,
+        type: OrderType.STORE_SALE,
+        items: [],
+        shippingAddress: storeOrder.shippingAddress,
+      }),
+    );
+    const replacement = { _id: new Types.ObjectId() };
+    orderModel.save.mockResolvedValue(replacement);
+    await expect(service.reorderReturned(ORDER_ID)).resolves.toBe(replacement);
+    expect(members.recordOrder).toHaveBeenCalledWith(replacement);
   });
 });

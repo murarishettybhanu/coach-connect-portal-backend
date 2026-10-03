@@ -16,6 +16,7 @@ import { TribesModule } from '../tribes/tribes.module';
 import { BarcodesModule } from '../barcodes/barcodes.module';
 import { WhatsappModule } from '../whatsapp/whatsapp.module';
 import { UsersModule } from '../users/users.module';
+import { TribeMembersModule } from '../tribe-members/tribe-members.module';
 
 @Module({
   imports: [
@@ -34,6 +35,8 @@ import { UsersModule } from '../users/users.module';
     WhatsappModule,
     // Resolves the user behind a bearer token on the public write routes.
     UsersModule,
+    // Keeps tribe members in step with every order write.
+    TribeMembersModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => ({

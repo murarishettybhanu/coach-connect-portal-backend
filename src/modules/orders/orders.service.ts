@@ -23,7 +23,9 @@ import { WhatsappService } from '../whatsapp/whatsapp.service';
 import { titleCaseName } from '../../common/utils/name.util';
 import { isAllowedMediaUrl } from '../../common/utils/media-url';
 import { pageSizeOf } from '../../common/utils/pagination.util';
+import { coachIdsFilter } from '../../common/utils/coach-ids.util';
 import { MAX_MEDIA_ORDERS } from './dto/download-media.dto';
+import { TribeMembersService } from '../tribe-members/tribe-members.service';
 
 // A rejected claim is dead: no dispatch, no commission. Order listings exclude
 // them so the tables only hold work that still matters. `$ne` also matches the
@@ -86,25 +88,6 @@ const lineQuantity = (item: any): number =>
 const sizeOf = (item: any): string | undefined =>
   item?.customizationType === 'SIZE' ? item.customizationValue : undefined;
 
-/**
- * The admin order tables filter by one tribe or several — `coachId` arrives as
- * one id, a comma-separated list, or repeated query params. Returns the Mongo
- * condition, or undefined for "every tribe". A malformed id is a 400 rather
- * than a filter that silently matches nothing.
- */
-function coachIdsFilter(coachId?: string | string[]) {
-  if (!coachId) return undefined;
-  const ids = [coachId]
-    .flat()
-    .flatMap((v) => String(v).split(','))
-    .map((v) => v.trim())
-    .filter(Boolean);
-  if (ids.some((id) => !isValidObjectId(id))) {
-    throw new BadRequestException('Invalid tribe id');
-  }
-  return ids.length ? { $in: ids } : undefined;
-}
-
 @Injectable()
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
@@ -119,7 +102,24 @@ export class OrdersService {
     private whatsapp: WhatsappService,
     // Read-only: a kit-linked campaign's price can come from its kit.
     @InjectModel(TribeKit.name) private kitModel: Model<TribeKit>,
+    // Links each order to its tribe member (coachId + phone).
+    private members: TribeMembersService,
   ) {}
+
+  /**
+   * Keeps the order's tribe member in step after a write that can change it.
+   * A member is derived data: a failure here is logged, never surfaced, so it
+   * can't fail the order operation itself (the backfill script repairs drift).
+   */
+  private async recordMember(order: any): Promise<void> {
+    try {
+      await this.members.recordOrder(order);
+    } catch (err: any) {
+      this.logger.error(
+        `Tribe member sync failed for order ${String(order?._id ?? order)}: ${err?.message ?? err}`,
+      );
+    }
+  }
 
   /**
    * A campaign order must take exactly the campaign's contents: for each
@@ -385,6 +385,7 @@ export class OrdersService {
       });
     }
 
+    await this.recordMember(savedOrder);
     return savedOrder;
   }
 
@@ -522,6 +523,7 @@ export class OrdersService {
       order.addressPending = false;
       order.markModified('shippingAddress');
       await order.save();
+      await this.recordMember(order);
     }
     return { updated: orders.length };
   }
@@ -546,7 +548,9 @@ export class OrdersService {
     order.shippingAddress = this.mergeAddress(order.shippingAddress, address);
     order.addressPending = false;
     order.markModified('shippingAddress');
-    return order.save();
+    const saved = await order.save();
+    await this.recordMember(saved);
+    return saved;
   }
 
   // Admin: SOFT-delete an order — hidden from all lists/pipeline, recoverable via
@@ -569,6 +573,8 @@ export class OrdersService {
       }
       return; // already deleted
     }
+    // The member's order count and dates leave this order out from now on.
+    await this.recordMember(order);
 
     if (ON_SHELF.includes(order.status)) {
       await this.moveItemsStock(order.items, +1);
@@ -596,6 +602,7 @@ export class OrdersService {
       )
       .exec();
     if (!order) return this.findOne(id); // not deleted (or 404s)
+    await this.recordMember(order);
 
     if (ON_SHELF.includes(order.status)) {
       await this.moveItemsStock(order.items, -1);
@@ -863,11 +870,12 @@ export class OrdersService {
 
     // Stock was returned when the parcel came back; the replacement consumes it.
     let stockTaken = false;
+    let saved: Order;
     try {
       await replacement.validate();
       await this.moveItemsStock(original.items, -1);
       stockTaken = true;
-      return await replacement.save();
+      saved = await replacement.save();
     } catch (err) {
       // Undo the claim so the return can be re-sent once the problem is fixed.
       if (stockTaken) await this.moveItemsStock(original.items, +1);
@@ -876,6 +884,8 @@ export class OrdersService {
         .exec();
       throw err;
     }
+    await this.recordMember(saved);
+    return saved;
   }
 
   // Admin: list soft-deleted orders (optionally scoped to a tribe).

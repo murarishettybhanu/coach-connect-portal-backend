@@ -100,6 +100,8 @@ src/
     transactions/# Wallet ledger, balance, payouts
     whatsapp/    # Public WhatsApp Cloud API webhook (inbound messages)
     tracking/    # India Post consignment tracking (official Bulk Tracking API)
+    tribe-members/ # Customers per tribe, derived from orders (admin read-only)
+  scripts/       # One-off maintenance scripts run with ts-node (backfills)
 ```
 
 ### India Post tracking (`tracking/`)
@@ -178,7 +180,14 @@ Operational notes:
   `approvalStatus` (`PENDING | APPROVED | REJECTED | null`), `items[]`
   (productId, quantity, baseCost, retailPrice, commission), `totalCommission`,
   `totalAmount`, `totalCost`, `shippingAddress` (India format: pincode, state,
-  district, sector/village…), tracking/courier/payment refs.
+  district, sector/village…), tracking/courier/payment refs. `memberId` → the
+  TribeMember it belongs to (every order, including rejected/deleted ones).
+- **TribeMember** (`tribemembers`) — a customer of one tribe, derived from its
+  orders. Identity `{ coachId, phone }` (unique; phone = last 10 digits).
+  `name` / `email` / `alternatePhone` (latest non-empty across the orders),
+  `addresses[]` (distinct by line 1 + pincode, `lastUsedAt`, newest first),
+  `orderCount` / `firstOrderAt` / `lastOrderAt` (non-deleted orders only).
+  Never edited directly — see "Tribe members" below.
 - **WhatsappSetting** — singleton (`key: 'default'`) behind the admin settings page:
   `autoReplyEnabled`, `acknowledgementText`, plus business hours
   (`businessHoursEnabled`, `openTime`/`closeTime`, `openDays`, `timezone`,
@@ -308,6 +317,41 @@ Applies to campaigns created from a kit; older campaigns are untouched.
 `getBalance` = sum of COMMISSION amounts minus PAYOUT/DEBIT amounts (computed from
 the ledger, not read off `coach.walletBalance` — the schema field is not the source of truth).
 
+## Tribe members (`tribe-members/`)
+
+A member is one person's history with one tribe: every order with the same
+`coachId` and phone (last 10 digits, so `+91 98765 43210` = `9876543210`). The
+same person ordering from two tribes is two members. Members are **derived
+data** — `TribeMembersService.recordOrder(order)` recomputes one from all the
+orders linked to it — so there is no create/edit endpoint.
+- **Where it's called** (`OrdersService.recordMember`): create, attach-address
+  (each order it completes), `PATCH /orders/:id/address`, reorder (the new
+  order), delete and restore. Failures are **logged and swallowed** — they
+  never fail the order write. Re-running the backfill repairs any drift.
+- **Race safety without transactions**: the member is found or created with an
+  upsert on the unique `{ coachId, phone }` index (an E11000 from a concurrent
+  upsert re-reads the winner), and the recomputed fields are written
+  conditionally on the member's `__v`, so of two orders syncing one member at
+  once the one holding an older picture retries rather than overwrites.
+- Contact details and addresses come from **all** linked orders (latest
+  non-empty wins); counts and first/last dates skip soft-deleted ones (rejected
+  ones still count). Address-pending claims add no address until one is
+  attached. Because it is a recompute, correcting an order's address replaces
+  the old one, and an order whose phone changes moves to the new member (the
+  old one is deleted once it has no orders).
+- Linking writes only `memberId`, with `timestamps: false` — the order's
+  `updatedAt` doesn't move.
+- **Backfill** (`src/scripts/backfill-tribe-members.ts`) — idempotent, prints
+  counts only (never names/phones/addresses); additive writes only (the new
+  collection and `memberId`). Dry run first:
+  `MONGODB_URI=... npx ts-node src/scripts/backfill-tribe-members.ts --dry-run`,
+  then without `--dry-run`. Also built to `dist/scripts/` for running in the
+  container (`node dist/scripts/backfill-tribe-members.js`). A second run
+  reports "No changes".
+- Tests: `tribe-members.int.spec.ts` covers the upsert race and idempotence
+  against a real MongoDB (`MONGO_TEST_URI=… npx jest tribe-members`; it uses its
+  own `shipkit_membertest` database and drops it).
+
 ## API surface (all prefixed `/api`)
 
 - **auth**: `POST /auth/register`, `POST /auth/login` → `{ access_token, user }`
@@ -326,6 +370,13 @@ the ledger, not read off `coach.walletBalance` — the schema field is not the s
 - **orders**: `GET /me` & `GET /coach` (coach), `GET /pending-approvals` (admin/coach),
   `POST /` (public checkout), `GET /` (admin), `GET /:id`, `PATCH /:id/status` (admin),
   `PATCH /:id/approve` & `PATCH /:id/reject` (admin/coach)
+- **tribe-members** (admin only): `GET /tribe-members?coachId=<id,id>&search=&page=&limit=`
+  → `{ data, total, page, limit, totalPages }`, sorted `lastOrderAt` desc, limit
+  default 20; search (escaped, case-insensitive) on name, phone, email, any
+  address's city or pincode; each member has `coachId` populated as
+  `{ _id, username, brand, name, userId: { name } }`. `GET /tribe-members/:id`
+  (same populate, all addresses). `GET /tribe-members/:id/orders` → plain array,
+  non-deleted first then `createdAt` desc, populated like the admin order tables
 - **tracking** (admin/tribe): `GET /tracking/:consignmentNumber`,
   `POST /tracking/bulk` (`{ consignmentNumbers: [] }`, max 500 — results come back
   in the order asked for)

@@ -31,6 +31,13 @@ export class Order extends Document {
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Campaign' })
   campaignId?: MongooseSchema.Types.ObjectId;
 
+  // The tribe member (coachId + phone) this order belongs to. Set by
+  // TribeMembersService.recordOrder after every write that can change it, and
+  // by the backfill script for older orders. Every order is linked, including
+  // rejected and soft-deleted ones.
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'TribeMember' })
+  memberId?: MongooseSchema.Types.ObjectId;
+
   @Prop({ required: true, enum: OrderType })
   type: OrderType;
 
@@ -190,3 +197,5 @@ OrderSchema.index({ 'statusHistory.status': 1, 'statusHistory.at': 1 });
 OrderSchema.index({ campaignId: 1, 'shippingAddress.phone': 1 });
 // Admin listings across every tribe sort on it.
 OrderSchema.index({ createdAt: -1 });
+// A member's orders (member detail page, and recomputing the member's totals).
+OrderSchema.index({ memberId: 1, createdAt: -1 });
