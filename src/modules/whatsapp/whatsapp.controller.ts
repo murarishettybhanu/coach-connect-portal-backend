@@ -22,6 +22,7 @@ import { SkipThrottle } from '@nestjs/throttler';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { WhatsappService } from './whatsapp.service';
 import { WhatsappApiService } from './whatsapp-api.service';
+import { WhatsappInboxService } from './whatsapp-inbox.service';
 import { SendReplyDto } from './dto/send-reply.dto';
 import { CreateTemplateDto } from './dto/create-template.dto';
 import { SendTemplateDto } from './dto/send-template.dto';
@@ -87,6 +88,7 @@ export class WhatsappAdminController {
   constructor(
     private readonly whatsappService: WhatsappService,
     private readonly api: WhatsappApiService,
+    private readonly inbox: WhatsappInboxService,
   ) {}
 
   // GET /api/whatsapp/conversations — inbox list, most recently active first.
@@ -94,6 +96,28 @@ export class WhatsappAdminController {
   @Roles(UserRole.ADMIN)
   listConversations() {
     return this.whatsappService.listConversations();
+  }
+
+  // GET /api/whatsapp/inbox/tribes — every tribe with its chat/unread counts,
+  // plus the "other" bucket (numbers matching no tribe owner or member).
+  @Get('inbox/tribes')
+  @Roles(UserRole.ADMIN)
+  inboxTribes() {
+    return this.inbox.summary();
+  }
+
+  // GET /api/whatsapp/inbox/tribes/:id — the owner (+ their chat) and members' chats.
+  @Get('inbox/tribes/:id')
+  @Roles(UserRole.ADMIN)
+  inboxTribe(@Param('id') id: string) {
+    return this.inbox.tribe(id);
+  }
+
+  // GET /api/whatsapp/inbox/other — chats with numbers no tribe knows.
+  @Get('inbox/other')
+  @Roles(UserRole.ADMIN)
+  inboxOther() {
+    return this.inbox.other();
   }
 
   // GET /api/whatsapp/conversations/:contact — one thread, oldest first.

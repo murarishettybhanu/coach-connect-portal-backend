@@ -374,13 +374,23 @@ export class WhatsappService {
       .lean()
       .exec();
 
-    return conversations.map((c) => ({
+    return conversations.map((c) => this.presentConversation(c));
+  }
+
+  /** A conversation as the inbox shows it: plus whether the reply window is open. */
+  presentConversation(
+    c: any,
+  ): Record<string, unknown> & {
+    windowOpen: boolean;
+    windowExpiresAt: Date | null;
+  } {
+    return {
       ...c,
       windowOpen: this.isWindowOpen(c.lastInboundAt),
       windowExpiresAt: c.lastInboundAt
         ? new Date(new Date(c.lastInboundAt).getTime() + WINDOW_MS)
         : null,
-    }));
+    };
   }
 
   /** One thread, oldest first so it reads top-to-bottom like a chat. */
