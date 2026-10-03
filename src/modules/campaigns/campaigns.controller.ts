@@ -15,6 +15,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../schemas/user.schema';
+import { CampaignStatus } from '../../schemas/campaign.schema';
 
 @Controller('campaigns')
 export class CampaignsController {
@@ -69,6 +70,16 @@ export class CampaignsController {
       const owner = String(campaign.coachId?._id || campaign.coachId);
       if (owner !== String(coach._id)) {
         throw new ForbiddenException('Not authorized to update this campaign');
+      }
+      // Stopping is final for a tribe; only an admin can reactivate a stopped campaign.
+      if (
+        campaign.status === CampaignStatus.STOPPED &&
+        campaignData.status &&
+        campaignData.status !== CampaignStatus.STOPPED
+      ) {
+        throw new ForbiddenException(
+          'Only an admin can reactivate a stopped campaign',
+        );
       }
       delete campaignData.coachId;
       delete campaignData.claims;
