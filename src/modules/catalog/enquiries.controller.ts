@@ -37,6 +37,18 @@ export class AdminEnquiriesController {
     return this.enquiries.list();
   }
 
+  // Polled by every admin page: the unread badge + new-enquiry pop-ups.
+  @Get('unread')
+  unread() {
+    return this.enquiries.unread();
+  }
+
+  // Opening an enquiry in the portal marks it read.
+  @Patch(':id/seen')
+  markSeen(@Param('id') id: string) {
+    return this.enquiries.markSeen(id);
+  }
+
   @Patch(':id')
   update(@Param('id') id: string, @Body() dto: UpdateEnquiryDto) {
     return this.enquiries.update(id, dto);
