@@ -163,9 +163,9 @@ Operational notes:
   `bio`, `tagline`, `socialLinks`, `walletBalance`, `storefrontConfig`
   (banner/theme/domain), `bankingDetails` (account/IFSC). `isActive`.
 - **Product** — owned by a Coach. `customizationType` (`TEXT | PHOTO | SIZE`) with
-  `sizeOptions` for the sizes a customer chooses from (empty = the standard XS–XXL).
-  Stock is per product, not per size — see Future scope. `name`, `baseProductionCost`, `retailPrice`,
-  `sku` (unique), `stockLevel`, `imageUrl`, `isActive`.
+  `sizeOptions` for the sizes a customer chooses from (empty = the standard XS–XXL),
+  `disabledSizes` (off sale) and `sizeStock` (per-size quantities) — see "Stock" below.
+  `name`, `baseProductionCost`, `retailPrice`, `sku` (unique), `stockLevel`, `imageUrl`, `isActive`.
 - **Campaign** — owned by a Coach. `type` (`WELCOME_KIT | STORE_SALE`),
   `products[]` (productId + optional `retailPrice` for store sales), unique `slug`
   (public URL), `status` (`ACTIVE | PAUSED | STOPPED`), `claims` counter.
@@ -216,6 +216,51 @@ This is where the money math lives; touch carefully.
 - **approveOrder** (welcome kits only): sets APPROVED, records the deferred COMMISSION transaction.
 - **rejectOrder** (welcome kits only): sets REJECTED + status CANCELLED and **restores stock**.
 
+### Stock (`products.service.ts`)
+
+**Orders never block on stock** (decision, 2026-10-03). Claims, checkout, CSV
+imports, restores and re-sends always go through; stock may go **below zero**,
+and that negative number is the shortfall the admin restocks. Only the admin
+sees it — `ProductsController` floors stock at 0 for every other role, the
+public storefront does the same, and campaign responses carry no stock at all.
+Manual *removals* are the one exception: they can't take a size (or Unassigned)
+below zero, since they're physical corrections.
+
+**Per-size stock.** A SIZE product keeps `sizeStock: [{ size, qty }]` alongside
+`stockLevel`, which stays the product total. Anything in the total beyond the
+sum of the sizes is **Unassigned** — stock not yet counted into a size (all of
+it, for products that existed before this was built). Rules worth knowing:
+- An **array, not a map**: Mongo keys can't contain dots (`"32.5"`), and one
+  positional `$inc` moves a size *and* the total together, so the total is
+  always the sum by construction. A size's first movement `$push`es its bucket
+  behind a `$ne` guard, so concurrent first orders retry instead of pushing twice.
+- `decrementStock` / `incrementStock` take the order line's size
+  (`item.customizationValue` when `customizationType` is SIZE). `matchSize`
+  (`src/common/sizes.ts`) resolves it case-insensitively to the product's own
+  spelling; an **unknown or missing size moves only the total**, i.e. Unassigned.
+  All seven order paths pass it — create (+ its rollback), delete, restore,
+  reject, return, reorder.
+- **Old orders** (placed before per-size stock) need no backfill: if one is
+  rejected/deleted/returned later, its unit goes back to the size on the order.
+- `disabledSizes` = **off sale**: hidden from the claim and checkout forms, stock
+  kept, re-enable to sell the rest off. Orders already in that size are untouched,
+  and the server doesn't reject the size (CSV imports may still use it).
+- **Size stock page** (`GET /products/sized`, `PATCH /products/:id/size-stock`):
+  the admin enters what's **on the shelf** per size; the page subtracts units
+  `promised` to open orders (NEW/PACKED, not rejected/deleted, not dropped at
+  approval) and saves the result. The new total is the sum — so the same call
+  splits Unassigned *and* corrects to a physical count; every changed bucket is
+  logged in `InventoryLog` with its `size`. `expectedUpdatedAt` makes a save
+  fail with 409 if an order moved stock while the page was open.
+- Tests: `src/modules/products/size-stock.int.spec.ts` runs against a real,
+  throwaway MongoDB (`MONGO_TEST_URI=mongodb://localhost:27017/shipkit_sizetest
+  npx jest size-stock`) and is skipped without it — the logic lives in the
+  atomic updates, so a mocked model would prove nothing.
+
+Known gaps: a claim always takes **one** of each campaign product (the claim form
+sends `quantity: 1`), so a kit defined with 2 of a product ships 1 and asks for
+one size. Tribe-kit "buildable" counts use the product total, not sizes.
+
 ### Wallet balance (`transactions.service.ts`)
 `getBalance` = sum of COMMISSION amounts minus PAYOUT/DEBIT amounts (computed from
 the ledger, not read off `coach.walletBalance` — the schema field is not the source of truth).
@@ -225,8 +270,10 @@ the ledger, not read off `coach.walletBalance` — the schema field is not the s
 - **auth**: `POST /auth/register`, `POST /auth/login` → `{ access_token, user }`
 - **coaches**: `POST /` (admin), `GET /` (admin), `GET /profile` (coach),
   `GET /:username` (public), `GET /id/:id` (admin), `PATCH /:id` (admin/coach)
-- **products**: all guarded. `POST` `PATCH` `DELETE` admin-only; `GET /` `GET /:id` any authed.
-  `GET /products?coachId=` filters by coach.
+- **products**: all guarded. `POST` `PATCH` `DELETE` admin-only; `GET /` `GET /:id` any authed
+  (stock floored at 0 for non-admins). `GET /products?coachId=` filters by coach.
+  Admin: `GET /products/sized`, `PATCH /:id/size-stock`, `PATCH /:id/inventory/add|remove`
+  (optional `size`), `GET /:id/inventory/logs`.
 - **campaigns**: `GET /me` (coach), `POST /` (coach/admin), `GET /` (admin),
   `GET /slug/:slug` (public), `GET /:id`, `PATCH /:id` (coach/admin)
 - **orders**: `GET /me` & `GET /coach` (coach), `GET /pending-approvals` (admin/coach),
@@ -365,53 +412,6 @@ appears in both columns, which is correct, not double counting.
 - Shares the digest's on/off switches, so one setting governs both jobs.
 
 ## Future scope
-
-### Per-size inventory (planned, not built)
-
-A product with `customizationType: 'SIZE'` carries `sizeOptions` (the choices a
-customer picks from), but stock is still a single `Product.stockLevel` for the
-whole product — sell 40 tees and nothing knows how many mediums are left.
-
-Chosen approach when we pick this up — **per-size quantities on the product**,
-not a product per size (which would multiply the catalogue and lose the size
-dropdown) and not a full `ProductVariant` collection (right at 10× the
-catalogue, but it touches orders, kits, campaigns, CSV and labels):
-
-```ts
-sizeStock: [{ size: 'M', qty: 12 }, { size: '32.5', qty: 4 }]
-```
-
-An **array of subdocuments, not a map** — Mongo keys can't contain dots, so
-`{ '32.5': 4 }` breaks on the first half-size. The array also allows the atomic
-guard that keeps the total honest by construction:
-
-```js
-updateOne(
-  { _id, sizeStock: { $elemMatch: { size, qty: { $gte: q } } } },
-  { $inc: { 'sizeStock.$.qty': -q, stockLevel: -q } },
-)
-```
-
-One operation moves the size *and* the cached total, so `stockLevel` stays a
-correct sum and every existing report keeps working.
-
-Work, roughly 3 days: atomic helpers + tests · thread `item.customizationValue`
-through **all seven** order stock paths (create + rollback, delete, restore,
-reject, return, reorder) · per-size admin adjustments with `size` on
-`InventoryLog` · disable sold-out sizes in the claim/checkout dropdowns ·
-migration + a reconciliation script.
-
-Decide before starting:
-1. **Migration has no breakdown** — 40 in stock doesn't say 10 of each. Needs a
-   one-time admin screen to distribute; don't assume an even split.
-2. **Kits** containing a sized product have no size picker in the claim flow.
-   Per-size stock makes that gap load-bearing.
-3. The **CSV order importer** has a Size column and creates orders directly — it
-   must respect per-size stock or it becomes the drift vector.
-4. **Removing a size** that still holds stock or open orders: block, or keep the
-   bucket until it empties.
-5. **Legacy orders** carry a size but were never counted per-size — reconcile
-   from `sizeStock`, never by replaying order history.
 
 ### Notifications — surface failed sends (planned, not built)
 

@@ -21,6 +21,7 @@ export class Product extends Document {
   @Prop({ required: true, unique: true })
   sku: string;
 
+  // Total stock. May go below zero — orders never block on stock (see sizeStock).
   @Prop({ default: 0 })
   stockLevel: number;
 
@@ -38,6 +39,30 @@ export class Product extends Document {
   // shoe sizes, "Free size").
   @Prop({ type: [String], default: undefined })
   sizeOptions?: string[];
+
+  // Sizes taken off sale. Hidden from the claim and checkout forms but kept, with
+  // whatever stock they hold, so they can be re-enabled to sell the rest off.
+  @Prop({ type: [String], default: undefined })
+  disabledSizes?: string[];
+
+  // Stock held per size, for SIZE products. `stockLevel` stays the product total;
+  // whatever it holds beyond the sum of these is "Unassigned" — not yet counted
+  // into a size (all of it, until the admin splits it). An array rather than a
+  // map because Mongo keys can't contain dots ("32.5"), and because it lets one
+  // positional $inc move a size and the total together.
+  // Quantities may go below zero: orders never block on stock, and a negative
+  // number is the shortfall the admin has to restock.
+  @Prop({
+    type: [
+      {
+        _id: false,
+        size: { type: String, required: true },
+        qty: { type: Number, default: 0 },
+      },
+    ],
+    default: undefined,
+  })
+  sizeStock?: { size: string; qty: number }[];
 
   @Prop({ default: true })
   isActive: boolean;

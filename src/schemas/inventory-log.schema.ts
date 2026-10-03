@@ -25,6 +25,11 @@ export class InventoryLog extends Document {
   @Prop({ required: true })
   resultingStock: number;
 
+  // For SIZE products: the size that moved, or "Unassigned" for stock not yet
+  // counted into a size. Absent for products without sizes.
+  @Prop()
+  size?: string;
+
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'User' })
   performedBy?: MongooseSchema.Types.ObjectId;
 }

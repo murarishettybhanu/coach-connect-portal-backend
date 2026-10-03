@@ -8,6 +8,7 @@ import {
   InventoryLog,
   InventoryLogSchema,
 } from '../../schemas/inventory-log.schema';
+import { Order, OrderSchema } from '../../schemas/order.schema';
 import { TribesModule } from '../tribes/tribes.module';
 
 @Module({
@@ -15,6 +16,8 @@ import { TribesModule } from '../tribes/tribes.module';
     MongooseModule.forFeature([
       { name: Product.name, schema: ProductSchema },
       { name: InventoryLog.name, schema: InventoryLogSchema },
+      // Read-only here: counts units promised to open orders (size-stock page).
+      { name: Order.name, schema: OrderSchema },
     ]),
     TribesModule,
   ],

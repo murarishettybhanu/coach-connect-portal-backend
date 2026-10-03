@@ -13,8 +13,9 @@ export class CampaignsService {
   private readonly activeProductPopulate = {
     path: 'products.productId',
     match: { isDeleted: { $ne: true } },
-    // Never expose internal cost on campaign responses (many are public).
-    select: '-baseProductionCost',
+    // Never expose internal cost or stock on campaign responses (many are public;
+    // stock can be negative, and shortfalls are for the admin only).
+    select: '-baseProductionCost -stockLevel -sizeStock',
   };
 
   // A populate `match` sets non-matching refs to null rather than removing the

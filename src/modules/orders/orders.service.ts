@@ -41,6 +41,10 @@ const DISPATCH_IMAGE_URL = 'https://tribemerchandise.com/whatsapp-dispatch.jpg';
 const DELIVERED_IMAGE_URL = 'https://tribemerchandise.com/whatsapp-delivered.jpg';
 const DEFAULT_ORDER_IMAGE_URL = 'https://tribemerchandise.com/tribe-logo.png';
 
+// The size a stored order line was claimed in, so its stock moves in that size.
+const sizeOf = (item: any): string | undefined =>
+  item?.customizationType === 'SIZE' ? item.customizationValue : undefined;
+
 @Injectable()
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
@@ -93,8 +97,8 @@ export class OrdersService {
     let totalAmount = 0;
     let totalCost = 0;
     const itemsWithDetails: any[] = [];
-    // Track atomic decrements so we can roll them back on any failure.
-    const decremented: { id: string; qty: number }[] = [];
+    // Track decrements so we can roll them back on any failure.
+    const decremented: { id: string; qty: number; size?: string }[] = [];
 
     try {
       for (const item of rawItems) {
@@ -126,12 +130,11 @@ export class OrdersService {
         totalCost += product.baseProductionCost * quantity;
         totalCommission += commission;
 
-        // Atomic stock check + decrement.
-        const ok = await this.productsService.decrementStock(String(product._id), quantity);
-        if (!ok) {
-          throw new BadRequestException(`Insufficient stock for ${product.name}`);
-        }
-        decremented.push({ id: String(product._id), qty: quantity });
+        // Stock never blocks an order or claim: it may go below zero, and that
+        // shortfall is what the admin restocks. A sized item draws from its size.
+        const size = item.customizationType === 'SIZE' ? item.customizationValue : undefined;
+        await this.productsService.decrementStock(String(product._id), quantity, size);
+        decremented.push({ id: String(product._id), qty: quantity, size });
 
         itemsWithDetails.push({
           productId: product._id,
@@ -146,7 +149,7 @@ export class OrdersService {
       }
     } catch (err) {
       // Compensate: restore any stock already decremented in this attempt.
-      for (const d of decremented) await this.productsService.incrementStock(d.id, d.qty);
+      for (const d of decremented) await this.productsService.incrementStock(d.id, d.qty, d.size);
       throw err;
     }
 
@@ -396,7 +399,7 @@ export class OrdersService {
     if (order.status !== OrderStatus.DELIVERED && order.status !== OrderStatus.CANCELLED) {
       for (const item of order.items) {
         const pid = (item.productId as any)?._id || item.productId;
-        if (pid) await this.productsService.incrementStock(String(pid), item.quantity);
+        if (pid) await this.productsService.incrementStock(String(pid), item.quantity, sizeOf(item));
       }
     }
     // Free the barcode back to the pool only while the order is still in the
@@ -423,7 +426,7 @@ export class OrdersService {
     if (order.status !== OrderStatus.DELIVERED && order.status !== OrderStatus.CANCELLED) {
       for (const item of order.items) {
         const pid = (item.productId as any)?._id || item.productId;
-        if (pid) await this.productsService.decrementStock(String(pid), item.quantity);
+        if (pid) await this.productsService.decrementStock(String(pid), item.quantity, sizeOf(item));
       }
     }
     const eligibleForCommission =
@@ -557,7 +560,7 @@ export class OrdersService {
 
     for (const item of order.items) {
       const pid = (item.productId as any)?._id || item.productId;
-      if (pid) await this.productsService.incrementStock(String(pid), item.quantity);
+      if (pid) await this.productsService.incrementStock(String(pid), item.quantity, sizeOf(item));
     }
 
     const now = new Date();
@@ -645,7 +648,7 @@ export class OrdersService {
     // Stock was returned when the parcel came back; the replacement consumes it.
     for (const item of original.items) {
       const pid = (item.productId as any)?._id || item.productId;
-      if (pid) await this.productsService.decrementStock(String(pid), item.quantity);
+      if (pid) await this.productsService.decrementStock(String(pid), item.quantity, sizeOf(item));
     }
 
     const now = new Date();
@@ -793,7 +796,7 @@ export class OrdersService {
     // Restore stock atomically.
     for (const item of order.items) {
       const pid = (item.productId as any)?._id || item.productId;
-      await this.productsService.incrementStock(String(pid), item.quantity);
+      await this.productsService.incrementStock(String(pid), item.quantity, sizeOf(item));
     }
 
     return order.save();

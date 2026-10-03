@@ -15,9 +15,38 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../schemas/user.schema';
-import { AddInventoryDto, RemoveInventoryDto } from './dto/inventory.dto';
+import {
+  AddInventoryDto,
+  RemoveInventoryDto,
+  SetSizeStockDto,
+} from './dto/inventory.dto';
 import { UpdateStoreSettingsDto } from './dto/update-store-settings.dto';
 import { TribesService } from '../tribes/tribes.service';
+
+// Stock shortfalls (negative stock) are for the admin only: everyone else sees
+// stock floored at zero.
+function hideShortfall<T>(p: T): T {
+  const doc: any = (p as any)?.toObject ? (p as any).toObject() : p;
+  if (!doc) return p;
+  return {
+    ...doc,
+    stockLevel: Math.max(0, doc.stockLevel || 0),
+    ...(doc.sizeStock
+      ? {
+          sizeStock: doc.sizeStock.map((s: any) => ({
+            ...s,
+            qty: Math.max(0, s.qty || 0),
+          })),
+        }
+      : {}),
+  };
+}
+const forRole = (req: any, data: any) =>
+  req?.user?.role === UserRole.ADMIN
+    ? data
+    : Array.isArray(data)
+      ? data.map(hideShortfall)
+      : hideShortfall(data);
 
 @Controller('products')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -34,23 +63,46 @@ export class ProductsController {
   }
 
   @Get()
-  findAll(
+  async findAll(
+    @Request() req: any,
     @Query('coachId') coachId?: string,
     @Query('deleted') deleted?: string,
   ) {
     if (coachId) {
       // `?deleted=true` returns only the coach's soft-deleted products so the
       // admin can review and recover them.
-      return deleted === 'true'
-        ? this.productsService.findDeletedByCoach(coachId)
-        : this.productsService.findByCoach(coachId);
+      return forRole(
+        req,
+        deleted === 'true'
+          ? await this.productsService.findDeletedByCoach(coachId)
+          : await this.productsService.findByCoach(coachId),
+      );
     }
-    return this.productsService.findAll();
+    return forRole(req, await this.productsService.findAll());
+  }
+
+  // Every sized product across tribes, with per-size stock (admin size-stock page).
+  // Declared before `:id` so "sized" isn't read as a product id.
+  @Get('sized')
+  @Roles(UserRole.ADMIN)
+  findSized() {
+    return this.productsService.findSized();
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.productsService.findOne(id);
+  async findOne(@Request() req: any, @Param('id') id: string) {
+    return forRole(req, await this.productsService.findOne(id));
+  }
+
+  // Set per-size stock (split Unassigned into sizes and/or correct to a count).
+  @Patch(':id/size-stock')
+  @Roles(UserRole.ADMIN)
+  setSizeStock(
+    @Param('id') id: string,
+    @Body() dto: SetSizeStockDto,
+    @Request() req: any,
+  ) {
+    return this.productsService.setSizeStock(id, dto, req.user?._id);
   }
 
   @Patch(':id')
@@ -96,6 +148,7 @@ export class ProductsController {
       dto.quantity,
       dto.reason,
       req.user?._id,
+      dto.size,
     );
   }
 
@@ -111,6 +164,7 @@ export class ProductsController {
       dto.quantity,
       dto.reason,
       req.user?._id,
+      dto.size,
     );
   }
 
