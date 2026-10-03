@@ -50,13 +50,17 @@ export class BarcodesService {
         $group: {
           _id: '$type',
           total: { $sum: 1 },
+          // Same rule as AVAILABLE above. In an aggregation a *missing* field
+          // is not equal to null (unlike in a find filter), and barcodes
+          // uploaded before manual write-offs existed have no manuallyUsedAt
+          // at all — so coalesce missing to null before comparing.
           used: {
             $sum: {
               $cond: [
                 {
                   $or: [
-                    { $ne: ['$assignedOrderId', null] },
-                    { $ne: ['$manuallyUsedAt', null] },
+                    { $ne: [{ $ifNull: ['$assignedOrderId', null] }, null] },
+                    { $ne: [{ $ifNull: ['$manuallyUsedAt', null] }, null] },
                   ],
                 },
                 1,
