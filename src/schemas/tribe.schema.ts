@@ -46,6 +46,8 @@ export class Tribe extends Document {
     bannerImage?: string;
     themeColor?: string;
     customDomain?: string;
+    // Colours, fonts and shapes — see StorefrontThemeDto.
+    theme?: Record<string, unknown> | null;
   };
 
   @Prop({ type: Object, default: {} })

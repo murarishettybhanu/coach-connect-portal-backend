@@ -236,7 +236,7 @@ export class CampaignsService {
   async findAll(): Promise<Campaign[]> {
     const campaigns = await this.campaignModel
       .find()
-      .populate('coachId', 'username brand name logoUrl contactEmail')
+      .populate('coachId', 'username brand name logoUrl contactEmail storefrontConfig')
       .populate(this.activeProductPopulate)
       .populate(this.internalKitPopulate)
       .lean()
@@ -258,7 +258,7 @@ export class CampaignsService {
   async findBySlug(slug: string): Promise<Campaign> {
     const campaign = await this.campaignModel
       .findOne({ slug } as any)
-      .populate('coachId', 'username brand name logoUrl contactEmail')
+      .populate('coachId', 'username brand name logoUrl contactEmail storefrontConfig')
       .populate(this.activeProductPopulate)
       .populate(this.publicKitPopulate)
       .lean()
@@ -274,7 +274,7 @@ export class CampaignsService {
     const internal = !!opts.internal;
     const campaign = await this.campaignModel
       .findById(id)
-      .populate('coachId', 'username brand name logoUrl contactEmail')
+      .populate('coachId', 'username brand name logoUrl contactEmail storefrontConfig')
       .populate(this.activeProductPopulate)
       .populate(internal ? this.internalKitPopulate : this.publicKitPopulate)
       .lean()

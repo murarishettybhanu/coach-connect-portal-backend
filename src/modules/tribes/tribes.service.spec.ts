@@ -97,4 +97,34 @@ describe('TribesService.update', () => {
     const [, update] = tribeModel.findByIdAndUpdate.mock.calls[0];
     expect(update).toEqual({ $set: { brand: 'B' } });
   });
+
+  it('merges storefrontConfig, so saving the theme keeps the banner', async () => {
+    const { service, tribeModel } = setup();
+    const stored = {
+      userId: 'user1',
+      storefrontConfig: { bannerImage: 'b.png', themeColor: '#111111' },
+    };
+    tribeModel.findById.mockReturnValue(
+      exec({ ...stored, toObject: () => stored }),
+    );
+    const theme = { colors: { primary: '#FF5500' }, headingFont: 'Poppins' };
+    await service.update('t1', { storefrontConfig: { theme } } as any);
+    const [, update] = tribeModel.findByIdAndUpdate.mock.calls[0];
+    expect(update.$set.storefrontConfig).toEqual({
+      bannerImage: 'b.png',
+      themeColor: '#111111',
+      theme,
+    });
+  });
+
+  it('merges onto a stored null or missing storefrontConfig', async () => {
+    const { service, tribeModel } = setup();
+    const stored = { userId: 'user1', storefrontConfig: null };
+    tribeModel.findById.mockReturnValue(
+      exec({ ...stored, toObject: () => stored }),
+    );
+    await service.update('t1', { storefrontConfig: { theme: null } } as any);
+    const [, update] = tribeModel.findByIdAndUpdate.mock.calls[0];
+    expect(update.$set.storefrontConfig).toEqual({ theme: null });
+  });
 });

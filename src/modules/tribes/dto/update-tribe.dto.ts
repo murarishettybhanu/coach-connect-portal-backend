@@ -2,6 +2,7 @@ import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsEmail,
+  IsIn,
   IsOptional,
   IsString,
   Matches,
@@ -9,6 +10,13 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
+
+import {
+  HEX_COLOR,
+  STOREFRONT_BUTTON_STYLES,
+  STOREFRONT_FONTS,
+  STOREFRONT_RADII,
+} from '../../../common/storefront-theme';
 
 export class SocialLinksDto {
   @IsOptional() @IsString() @MaxLength(500) instagram?: string;
@@ -30,10 +38,46 @@ export class BankingDetailsDto {
   @IsOptional() @IsString() @MaxLength(120) upiId?: string;
 }
 
+const HEX_MESSAGE = 'Colours must be a 6-digit hex code like #1B1F3B';
+
+export class StorefrontColorsDto {
+  @IsOptional() @Matches(HEX_COLOR, { message: HEX_MESSAGE }) primary?: string;
+  @IsOptional() @Matches(HEX_COLOR, { message: HEX_MESSAGE }) accent?: string;
+  @IsOptional()
+  @Matches(HEX_COLOR, { message: HEX_MESSAGE })
+  background?: string;
+  @IsOptional() @Matches(HEX_COLOR, { message: HEX_MESSAGE }) surface?: string;
+  @IsOptional() @Matches(HEX_COLOR, { message: HEX_MESSAGE }) text?: string;
+}
+
+/** The storefront's look: also applied to the tribe's checkout and claim forms. */
+export class StorefrontThemeDto {
+  // Which ready-made palette it started from (informational, for the editor).
+  @IsOptional() @IsString() @MaxLength(40) preset?: string;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => StorefrontColorsDto)
+  colors?: StorefrontColorsDto;
+
+  @IsOptional() @IsIn(STOREFRONT_FONTS) headingFont?: string;
+  @IsOptional() @IsIn(STOREFRONT_FONTS) bodyFont?: string;
+  @IsOptional() @IsIn(STOREFRONT_RADII) radius?: string;
+  @IsOptional() @IsIn(STOREFRONT_BUTTON_STYLES) buttonStyle?: string;
+  // Show bannerImage behind the storefront header.
+  @IsOptional() @IsBoolean() showBanner?: boolean;
+}
+
 export class StorefrontConfigDto {
   @IsOptional() @IsString() @MaxLength(1000) bannerImage?: string;
   @IsOptional() @IsString() @MaxLength(32) themeColor?: string;
   @IsOptional() @IsString() @MaxLength(253) customDomain?: string;
+
+  // null resets the storefront to the default look.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => StorefrontThemeDto)
+  theme?: StorefrontThemeDto | null;
 }
 
 /**

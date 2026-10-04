@@ -200,7 +200,23 @@ export class TribesService {
 
     const $set: Record<string, unknown> = {};
     for (const key of TRIBE_FIELDS) {
-      if ((tribeFields as any)[key] !== undefined) $set[key] = (tribeFields as any)[key];
+      const value = (tribeFields as any)[key];
+      if (value === undefined) continue;
+      if (key === 'storefrontConfig' && value && typeof value === 'object') {
+        // Merge, don't replace: saving the theme from the design editor must
+        // not wipe the banner or domain (and vice versa). Merged here rather
+        // than with dotted paths, which fail on a stored null.
+        const current = (tribe.toObject() as any).storefrontConfig;
+        const merged: Record<string, unknown> = {
+          ...(current && typeof current === 'object' ? current : {}),
+        };
+        for (const [sub, v] of Object.entries(value)) {
+          if (v !== undefined) merged[sub] = v;
+        }
+        $set.storefrontConfig = merged;
+        continue;
+      }
+      $set[key] = value;
     }
     const updatedCoach = await this.tribeModel
       .findByIdAndUpdate(id, { $set }, { new: true })

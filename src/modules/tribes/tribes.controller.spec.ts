@@ -77,6 +77,45 @@ describe('UpdateTribeDto', () => {
     ).toBeGreaterThan(0);
   });
 
+  it('accepts a storefront theme, and a null theme to reset it', async () => {
+    expect(
+      await errorsFor({
+        storefrontConfig: {
+          theme: {
+            preset: 'ocean',
+            colors: {
+              primary: '#0E7490',
+              accent: '#F59E0B',
+              background: '#F8FAFC',
+              surface: '#FFFFFF',
+              text: '#0F172A',
+            },
+            headingFont: 'Playfair Display',
+            bodyFont: 'Inter',
+            radius: 'round',
+            buttonStyle: 'pill',
+            showBanner: true,
+          },
+        },
+      }),
+    ).toEqual([]);
+    expect(await errorsFor({ storefrontConfig: { theme: null } })).toEqual([]);
+  });
+
+  it.each([
+    ['a non-hex colour', { colors: { primary: 'red' } }],
+    ['a 3-digit hex', { colors: { text: '#FFF' } }],
+    ['a CSS injection attempt', { colors: { background: '#FFF;}body{' } }],
+    ['a font outside the list', { headingFont: 'Comic Sans MS' }],
+    ['an unknown corner style', { radius: 'blobby' }],
+    ['an unknown button style', { buttonStyle: 'ghost' }],
+    ['an unexpected key', { css: 'body{display:none}' }],
+  ])('rejects a theme with %s', async (_label, theme) => {
+    expect(
+      (await errorsFor({ storefrontConfig: { theme } })).length,
+    ).toBeGreaterThan(0);
+  });
+
   it('accepts the branding, wallet and admin edit payloads', async () => {
     expect(
       await errorsFor({
