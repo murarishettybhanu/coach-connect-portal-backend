@@ -20,6 +20,7 @@ import { TribeKitsModule } from './modules/tribe-kits/tribe-kits.module';
 import { BarcodesModule } from './modules/barcodes/barcodes.module';
 import { WhatsappModule } from './modules/whatsapp/whatsapp.module';
 import { TribeMembersModule } from './modules/tribe-members/tribe-members.module';
+import { RestockModule } from './modules/restock/restock.module';
 
 @Module({
   imports: [
@@ -51,6 +52,7 @@ import { TribeMembersModule } from './modules/tribe-members/tribe-members.module
     BarcodesModule,
     WhatsappModule,
     TribeMembersModule,
+    RestockModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],

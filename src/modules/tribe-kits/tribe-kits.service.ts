@@ -24,6 +24,25 @@ import {
 
 type KitItem = { productId: any; quantity: number };
 
+/**
+ * Kits buildable from current stock = min over items of
+ * floor(product stockLevel / quantity per kit), never below 0. `kit.items`
+ * must have `productId` populated with at least `stockLevel`. A pure function
+ * (not a service method) so other modules — e.g. restock — can reuse it
+ * without depending on TribeKitsModule.
+ */
+export function buildableKits(kit: any): number {
+  const items = (kit?.items || []).filter((i: any) => i.productId);
+  if (!items.length) return 0;
+  let min = Infinity;
+  for (const it of items) {
+    const stock = it.productId?.stockLevel ?? 0;
+    const per = it.quantity || 1;
+    min = Math.min(min, Math.floor(stock / per));
+  }
+  return min === Infinity ? 0 : Math.max(0, min);
+}
+
 @Injectable()
 export class TribeKitsService {
   constructor(
@@ -121,7 +140,7 @@ export class TribeKitsService {
       return {
         ...k,
         kitPrice: k.kitPrice ?? null,
-        availableKits: this.buildable(k),
+        availableKits: buildableKits(k),
         productValue,
         minPrice,
         linkedCampaigns: linked.get(String(k._id)) ?? 0,
@@ -146,18 +165,6 @@ export class TribeKitsService {
       ])
       .exec();
     return new Map(rows.map((r: any) => [String(r._id), r.n]));
-  }
-
-  private buildable(kit: any): number {
-    const items = (kit.items || []).filter((i: any) => i.productId);
-    if (!items.length) return 0;
-    let min = Infinity;
-    for (const it of items) {
-      const stock = it.productId?.stockLevel ?? 0;
-      const per = it.quantity || 1;
-      min = Math.min(min, Math.floor(stock / per));
-    }
-    return min === Infinity ? 0 : Math.max(0, min);
   }
 
   /** 409 while any linked campaign is not STOPPED. */

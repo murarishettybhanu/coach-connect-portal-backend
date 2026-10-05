@@ -101,6 +101,7 @@ src/
     whatsapp/    # Public WhatsApp Cloud API webhook (inbound messages)
     tracking/    # India Post consignment tracking (official Bulk Tracking API)
     tribe-members/ # Customers per tribe, derived from orders (admin read-only)
+    restock/     # Stock-health overview for tribes + restock requests to the admin
   scripts/       # One-off maintenance scripts run with ts-node (backfills)
 ```
 
@@ -199,6 +200,11 @@ Operational notes:
   until it gets a 200, so writes are upserts), `from` (wa_id), `profileName`, `type`,
   best-effort `text`, `mediaId`/`mimeType`, `contextMessageId` (reply-to), `sentAt`,
   full `raw` payload, `handled` flag.
+- **RestockRequest** (`restockrequests`) — a tribe asking the admin to restock.
+  `coachId`, `items[]` (`kind` KIT|PRODUCT, `refId`, plus `name`/`quantity`/
+  `stockAtRequest` **snapshotted** at request time), `note?`, `neededBy?`,
+  `status` (`NEW | CONFIRMED | IN_PRODUCTION | RECEIVED | DECLINED`),
+  `adminNote?`, `seenAt?` (first admin open). See "Restock reminders" below.
 - **Transaction** — wallet ledger per Coach. `type` (`COMMISSION | PAYOUT | DEBIT`),
   `amount`, optional `orderId`, `utrReference` (payouts), `status`.
 
@@ -352,6 +358,57 @@ orders linked to it — so there is no create/edit endpoint.
   against a real MongoDB (`MONGO_TEST_URI=… npx jest tribe-members`; it uses its
   own `shipkit_membertest` database and drops it).
 
+## Restock reminders (`restock/`)
+
+Tells a tribe how its stock is holding up against what it ships, and lets it
+ask the admin for more. Shared contract with the frontend:
+`feat/restock-reminders` — names and shapes are fixed, change both sides together.
+Every tribe gets it (no permission switch); levels are automatic (no manual
+thresholds in v1).
+
+**Definitions** (pure functions in `restock/restock-math.ts`, unit-tested):
+for each of the tribe's non-deleted products and non-deleted TribeKits —
+- `stock`: product `stockLevel` (may be **negative** = shortfall); kit = buildable
+  count via `buildableKits` (exported from `tribe-kits.service.ts`, the same
+  function the kit list uses — floored at 0).
+- `shippedThisWeek`: dispatched in the **last 7 days, rolling**. Dispatched = a
+  `statusHistory` entry `{ status: DISPATCHED, at }` in the window, order not
+  soft-deleted, `coachId` = the tribe. Product = Σ line quantity (lines unticked
+  at approval, `selected: false`, are skipped — they never shipped); kit = number
+  of those orders whose campaign has `kitId` = the kit (one claim = one kit).
+- `weeklyPace` = max(dispatched in 28 days / 4, `shippedThisWeek`), 2 dp.
+- `daysLeft`: stock ≤ 0 → 0; pace 0 → null; else floor(stock / (pace / 7)).
+- `lowAt` = max(10, ceil(2 × pace)); `criticalAt` = max(5, ceil(pace)).
+- `level`: ≤ 0 OUT, ≤ criticalAt CRITICAL, ≤ lowAt LOW, else HEALTHY.
+- `suggestedQty` = max(0, ceil(max(4 × pace, 2 × lowAt) − stock)) — includes the
+  shortfall when stock is negative.
+
+Implementation notes: one `orders.find` per overview covers the whole 28-day
+window (`statusHistory` `$elemMatch`, uses the `statusHistory.status/at` index)
+and is split into 7d/28d in memory; the tribe's kit-linked campaigns are looked
+up once. `RestockModule` injects its models with `MongooseModule.forFeature`
+and imports no other feature module, so it can't create a DI cycle.
+
+**API** — tribe (`@Roles(TRIBE)`, tribe always from the session):
+- `GET /restock/overview` → `{ generatedAt, windowDays: 7, totals:
+  { shippedThisWeek (units, all lines), ordersShippedThisWeek }, highlight, items,
+  counts: { OUT, CRITICAL, LOW, HEALTHY }, pendingRequest }`. `items` sorted by
+  severity, then `daysLeft` asc (null last), then name. `highlight` = the kit with
+  the most `shippedThisWeek` (> 0), else the product with the most, else null.
+  `pendingRequest` = latest request in NEW / CONFIRMED / IN_PRODUCTION.
+- `POST /restock/requests` `{ items: [{ kind, id, quantity 1..100000 }] (1..100),
+  note? (≤ 1000), neededBy? (ISO) }` → the request. Each item must be the caller's
+  own non-deleted product/kit, and appear once, else 400.
+- `GET /restock/requests/mine` → newest 20.
+
+Admin (`@Roles(ADMIN)`), same unread pattern as enquiries:
+- `GET /admin/restock?status=&coachId=` → newest first, `coachId` populated
+  `{ _id, username, brand, name, userId: { name, phoneNumber } }`.
+- `GET /admin/restock/unread` → `{ count, latest: [{ _id, coachId (brand/name/
+  username), itemsCount, createdAt }] }` (≤ 5). Unread = NEW and no `seenAt`.
+- `PATCH /admin/restock/:id/seen` (first open kept) and `PATCH /admin/restock/:id`
+  `{ status?, adminNote? (≤ 1000) }` (also marks seen).
+
 ## API surface (all prefixed `/api`)
 
 - **auth**: `POST /auth/register`, `POST /auth/login` → `{ access_token, user }`
@@ -380,6 +437,10 @@ orders linked to it — so there is no create/edit endpoint.
 - **tracking** (admin/tribe): `GET /tracking/:consignmentNumber`,
   `POST /tracking/bulk` (`{ consignmentNumbers: [] }`, max 500 — results come back
   in the order asked for)
+- **restock**: `GET /restock/overview`, `POST /restock/requests`,
+  `GET /restock/requests/mine` (tribe); `GET /admin/restock`,
+  `GET /admin/restock/unread`, `PATCH /admin/restock/:id/seen`,
+  `PATCH /admin/restock/:id` (admin) — see "Restock reminders"
 - **transactions**: `GET /me` & `GET /my-balance` & `GET /coach` & `GET /balance` (coach),
   `POST /payout` (admin), `GET /` (admin)
 - **whatsapp**: `GET /whatsapp/webhook` (public — Meta's `hub.challenge` handshake,
@@ -510,6 +571,18 @@ appears in both columns, which is correct, not double counting.
 - Shares the digest's on/off switches, so one setting governs both jobs.
 
 ## Future scope
+
+### WhatsApp alert to an admin number — new restock requests & website inquiries
+
+Today a new restock request (`POST /restock/requests`) or website inquiry
+(`POST /enquiries`) reaches the admin only through the portal: an unread badge
+and a pop-up driven by `GET /admin/restock/unread` / `GET /admin/enquiries/unread`
+(decision for v1). Planned: also send a WhatsApp message to a configured admin
+number. Needs an approved utility template, an admin-number setting (env or
+WhatsappSetting), and a fire-and-forget send after the write that logs and
+swallows failures — it must never fail the tribe's request or the public form.
+See the caveat in the item below: a WhatsApp alert fails silently in exactly
+the cases (expired token, paused template) you'd most want to hear about.
 
 ### Notifications — surface failed sends (planned, not built)
 

@@ -70,6 +70,16 @@ $ mau deploy
 
 With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
 
+## Future scope
+
+- **WhatsApp alert to an admin number** for every new **restock request**
+  (`POST /api/restock/requests`) and every new **website inquiry**
+  (`POST /api/enquiries`). Today both surface only in the admin portal — an
+  unread badge plus a pop-up (`GET /api/admin/restock/unread`,
+  `GET /api/admin/enquiries/unread`). The WhatsApp Cloud API client is already
+  wired (`src/modules/whatsapp`); it needs an approved utility template, an
+  admin-number setting, and a fire-and-forget send that never fails the request.
+
 ## Resources
 
 Check out a few resources that may come in handy when working with NestJS:
