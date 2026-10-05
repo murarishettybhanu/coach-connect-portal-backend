@@ -545,6 +545,10 @@ fields, messages fixed — change both sides together). No permission switch.
 - **orders**: `GET /me` & `GET /coach` (coach), `GET /pending-approvals` (admin/coach),
   admin lists `GET /paginated`, `/by-coach/:coachId`, `/returned`, `/rejected`, `/deleted` take
   `campaignId` (comma list; `none` = no campaign) via `andCampaignFilter` in `common/utils/coach-ids.util.ts`,
+  `GET /duplicates` (admin; `coachId`, `campaignId`, `status` incl. `PENDING` = awaiting approval, `search`,
+  `page`, `limit`): orders whose phone (last 10 chars) is on another non-rejected, non-deleted order of the same
+  tribe; tribe/campaign set the scope, status/search only pick rows; grouped by number, newest group first;
+  returns `groups` too (`findDuplicates`, real-Mongo test `orders-duplicates.int.spec.ts`),
   `POST /deliver-by-tracking/preview` + `POST /deliver-by-tracking` (admin; `{ codes }`, up to 1000
   unique, case/space-insensitive; one row per code: READY (New / Ready to Ship / Dispatched) /
   ALREADY_DELIVERED / CLOSED (returned, cancelled) / AWAITING_APPROVAL / MULTIPLE / NOT_FOUND, then

@@ -280,6 +280,30 @@ export class OrdersController {
     return this.ordersService.withPriorClaims(await this.ordersService.findAll());
   }
 
+  // Admin: orders whose phone number is on another order of the same tribe.
+  @Get('duplicates')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  async findDuplicates(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+    @Query('coachId') coachId?: string | string[],
+    @Query('campaignId') campaignId?: string | string[],
+  ) {
+    return this.ordersService.withPriorClaimsPage(
+      await this.ordersService.findDuplicates({
+        page: page ? Number(page) : undefined,
+        limit: limit ? Number(limit) : undefined,
+        search,
+        status,
+        coachId,
+        campaignId,
+      }),
+    );
+  }
+
   @Get('paginated')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)

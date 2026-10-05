@@ -1401,6 +1401,128 @@ export class OrdersService {
     };
   }
 
+  /**
+   * Admin "Duplicate orders": orders whose phone number is on more than one
+   * order of the same tribe. Numbers match on their last 10 characters, so +91
+   * and spacing don't split a customer. Rejected and deleted orders don't count.
+   *
+   * Tribe and campaign set where repeats are looked for; status and search only
+   * pick rows from them — so a repeat whose other order is delivered still shows
+   * under "New". Rows come back grouped: each number's orders together (newest
+   * first), newest group first.
+   */
+  async findDuplicates(
+    options: {
+      page?: number;
+      limit?: number;
+      search?: string;
+      status?: string;
+      coachId?: string | string[];
+      campaignId?: string | string[];
+    } = {},
+  ): Promise<{
+    data: Order[];
+    total: number;
+    groups: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  }> {
+    const page = Math.max(1, Number(options.page) || 1);
+    const limit = pageSizeOf(options.limit, 20);
+
+    const scope: any = { ...NOT_REJECTED, isDeleted: { $ne: true } };
+    const coaches = coachIdsFilter(options.coachId);
+    if (coaches) scope.coachId = coaches;
+    andCampaignFilter(scope, options.campaignId);
+
+    // Aggregation doesn't cast like find(): turn id strings into ObjectIds first.
+    const match = this.orderModel.find().cast(this.orderModel, scope);
+    const phone = { $trim: { input: { $ifNull: ['$shippingAddress.phone', ''] } } };
+    const grouped: { ids: Types.ObjectId[] }[] = await this.orderModel
+      .aggregate([
+        { $match: match },
+        { $sort: { createdAt: -1 } },
+        { $project: { coachId: 1, createdAt: 1, p: phone } },
+        { $match: { p: { $ne: '' } } },
+        {
+          $group: {
+            _id: {
+              coachId: '$coachId',
+              phone: {
+                $substrCP: ['$p', { $max: [{ $subtract: [{ $strLenCP: '$p' }, 10] }, 0] }, 10],
+              },
+            },
+            ids: { $push: '$_id' },
+            n: { $sum: 1 },
+            latest: { $max: '$createdAt' },
+          },
+        },
+        { $match: { n: { $gt: 1 } } },
+        { $sort: { latest: -1, '_id.phone': 1 } },
+        { $project: { ids: 1 } },
+      ])
+      .exec();
+    let groupsOf = grouped.map((g) => g.ids.map(String));
+
+    // Status / search on top: keep the grouping, drop rows they exclude.
+    const narrow: any = {};
+    if (options.status) {
+      narrow.status = options.status;
+      if (options.status === OrderStatus.NEW) {
+        narrow.approvalStatus = { $ne: ApprovalStatus.PENDING };
+      } else if (options.status === 'PENDING') {
+        // "Pending approval" is an approval state, not an order status.
+        delete narrow.status;
+        narrow.approvalStatus = ApprovalStatus.PENDING;
+      }
+    }
+    const search = options.search?.trim();
+    if (search) {
+      const regex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      narrow.$or = [
+        { 'shippingAddress.fullName': regex },
+        { 'shippingAddress.phone': regex },
+        { 'shippingAddress.city': regex },
+        { trackingNumber: regex },
+      ];
+    }
+    if (Object.keys(narrow).length && groupsOf.length) {
+      const keep = new Set(
+        (
+          await this.orderModel
+            .find({ ...narrow, _id: { $in: groupsOf.flat() } } as any)
+            .select('_id')
+            .lean()
+            .exec()
+        ).map((o: any) => String(o._id)),
+      );
+      groupsOf = groupsOf.map((g) => g.filter((id) => keep.has(id))).filter((g) => g.length);
+    }
+
+    const ids = groupsOf.flat();
+    const total = ids.length;
+    const pageIds = ids.slice((page - 1) * limit, page * limit);
+    const docs = pageIds.length
+      ? await this.orderModel
+          .find({ _id: { $in: pageIds } } as any)
+          .populate('items.productId')
+          .populate({ path: 'coachId', populate: { path: 'userId', select: 'name email' } })
+          .populate('campaignId', 'name type packageWeight length breadth height')
+          .exec()
+      : [];
+    const byId = new Map(docs.map((d: any) => [String(d._id), d]));
+    const data = pageIds.map((id) => byId.get(id)).filter(Boolean) as Order[];
+    return {
+      data,
+      total,
+      groups: groupsOf.length,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+    };
+  }
+
   async findOne(id: string): Promise<Order> {
     const order = await this.orderModel
       .findOne({ _id: id, isDeleted: { $ne: true } } as any)
