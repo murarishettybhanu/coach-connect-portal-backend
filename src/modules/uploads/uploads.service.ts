@@ -2,11 +2,29 @@ import {
   BadRequestException,
   Injectable,
   Logger,
+  NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+} from '@aws-sdk/client-s3';
 import * as crypto from 'crypto';
+import { Readable } from 'stream';
+
+/** A private object read back from the bucket, ready to stream. */
+export interface PrivateObject {
+  stream: Readable;
+  contentLength?: number;
+}
+
+/** Only ObjectId-shaped owner ids reach a private key (no path tricks). */
+const OWNER_ID = /^[a-f0-9]{24}$/i;
+/** Private keys this service writes: `invoices/<ownerId>/<32 hex>.pdf`. */
+const PRIVATE_PDF_KEY = /^invoices\/[a-f0-9]{24}\/[a-f0-9]{32}\.pdf$/i;
 
 export interface DetectedImage {
   ext: 'jpg' | 'png' | 'webp' | 'gif';
@@ -49,7 +67,8 @@ export function detectImageType(buf: Buffer): DetectedImage | null {
 }
 
 /**
- * Uploads images to S3. Configured via env:
+ * Uploads images to S3 (public) and stores private objects (invoice PDFs —
+ * never given a URL, see the private-object helpers). Configured via env:
  *   AWS_REGION (default ap-south-1), S3_BUCKET,
  *   S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY,
  *   S3_PUBLIC_BASE_URL (optional; defaults to the bucket's virtual-hosted URL)
@@ -79,13 +98,113 @@ export class UploadsService {
       });
     } else {
       this.logger.warn(
-        'S3 not configured (S3_BUCKET/S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY) — image uploads disabled.',
+        'S3 not configured (S3_BUCKET/S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY) — image and invoice uploads disabled.',
       );
     }
   }
 
   isConfigured(): boolean {
     return this.client !== null;
+  }
+
+  private requireClient(): S3Client {
+    if (!this.client) {
+      throw new ServiceUnavailableException('File uploads are not configured.');
+    }
+    return this.client;
+  }
+
+  // ── Private objects (invoices) ────────────────────────────────────────────
+  // Same bucket and credentials as the public images, but these keys are never
+  // turned into a URL: they are read back only through an authenticated
+  // endpoint that checks ownership. Callers validate the bytes first.
+
+  /**
+   * Stores a PDF under `invoices/<ownerId>/<random 32-hex>.pdf` and returns
+   * the key. Nothing here builds a public URL.
+   */
+  async putPrivatePdf(ownerId: string, body: Buffer): Promise<string> {
+    const client = this.requireClient();
+    if (!OWNER_ID.test(ownerId)) {
+      throw new BadRequestException('Invalid owner id');
+    }
+    const key = `invoices/${ownerId.toLowerCase()}/${crypto.randomBytes(16).toString('hex')}.pdf`;
+    try {
+      await client.send(
+        new PutObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+          Body: body,
+          ContentType: 'application/pdf',
+          ContentLength: body.length,
+          CacheControl: 'private, no-store',
+        }),
+      );
+    } catch (err) {
+      this.rethrowAccessDenied(err, 'write');
+      throw err;
+    }
+    return key;
+  }
+
+  /**
+   * The S3 user has no rights on `invoices/*` (its IAM policy predates
+   * invoices) — say so plainly instead of a bare 500, and log the fix.
+   */
+  private rethrowAccessDenied(err: unknown, action: 'write' | 'read'): void {
+    if ((err as { name?: string })?.name !== 'AccessDenied') return;
+    this.logger.error(
+      `S3 denied ${action} on invoices/*: grant the uploader s3:PutObject, ` +
+        's3:GetObject and s3:DeleteObject on <bucket>/invoices/*',
+    );
+    throw new ServiceUnavailableException(
+      'Invoice storage is not set up yet (missing S3 permission). Contact the administrator.',
+    );
+  }
+
+  /** Opens a private object as a stream (404 if it isn't there). */
+  async getPrivateObject(key: string): Promise<PrivateObject> {
+    const client = this.requireClient();
+    if (!PRIVATE_PDF_KEY.test(key))
+      throw new NotFoundException('File not found');
+    try {
+      const out = await client.send(
+        new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
+      if (!out.Body) throw new NotFoundException('File not found');
+      return {
+        stream: out.Body as Readable,
+        contentLength:
+          typeof out.ContentLength === 'number' ? out.ContentLength : undefined,
+      };
+    } catch (err) {
+      const name = (err as { name?: string })?.name;
+      if (name === 'NoSuchKey' || name === 'NotFound') {
+        throw new NotFoundException('File not found');
+      }
+      this.rethrowAccessDenied(err, 'read');
+      throw err;
+    }
+  }
+
+  /**
+   * Deletes a private object, best-effort: a failure is logged and swallowed
+   * (an orphaned object is harmless; failing the caller's write isn't).
+   * Returns whether the delete went through.
+   */
+  async deletePrivateObject(key: string | null | undefined): Promise<boolean> {
+    if (!key || !this.client || !PRIVATE_PDF_KEY.test(key)) return false;
+    try {
+      await this.client.send(
+        new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
+      return true;
+    } catch (err) {
+      this.logger.warn(
+        `Could not delete private object ${key}: ${(err as Error)?.message ?? err}`,
+      );
+      return false;
+    }
   }
 
   async uploadImage(

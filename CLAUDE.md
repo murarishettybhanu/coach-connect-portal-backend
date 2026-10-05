@@ -41,7 +41,8 @@ CORS is restricted to the frontend origins in `CORS_ORIGINS`. Also live in `main
 - `JWT_SECRET` — **required** signing secret; boot fails fast if unset (no default)
 - `CORS_ORIGINS` — comma-separated allowed frontend origins
 - `SITE_ADDRESS` — Caddy apex/www domains for the static frontend (see Deployment)
-- `MAIL_*` (SES SMTP), `S3_*` (uploads to S3), `PORT` (default 3000)
+- `MAIL_*` (SES SMTP), `S3_*` (uploads to S3 — public images and private
+  invoice PDFs), `PORT` (default 3000)
 - `WHATSAPP_VERIFY_TOKEN` — echoed handshake token; must match the Meta dashboard
 - `WHATSAPP_APP_SECRET` — Meta app secret; verifies `X-Hub-Signature-256`.
   **Required in production** — the webhook refuses unverified deliveries without it
@@ -102,6 +103,7 @@ src/
     tracking/    # India Post consignment tracking (official Bulk Tracking API)
     tribe-members/ # Customers per tribe, derived from orders (admin read-only)
     restock/     # Stock-health overview for tribes + restock requests to the admin
+    invoices/    # Admin-uploaded invoice PDFs per tribe (private S3, streamed)
   scripts/       # One-off maintenance scripts run with ts-node (backfills)
 ```
 
@@ -205,6 +207,13 @@ Operational notes:
   `stockAtRequest` **snapshotted** at request time), `note?`, `neededBy?`,
   `status` (`NEW | CONFIRMED | IN_PRODUCTION | RECEIVED | DECLINED`),
   `adminNote?`, `seenAt?` (first admin open). See "Restock reminders" below.
+- **TribeInvoice** (`tribeinvoices`) — an invoice the admin uploaded to a tribe.
+  `coachId`, `invoiceNumber` (unique per tribe among non-deleted — partial index
+  `{ coachId, invoiceNumber }` where `isDeleted: false`), `invoiceDate`,
+  `reference?` (≤ 120), `amount` (INR, ≥ 0, 2 dp), `note?` (≤ 500), `fileKey`
+  (S3 key, `select: false`, **never returned**), `fileName` (original, admin
+  display), `fileSize`, `uploadedBy`, `viewedAt?` (tribe's first open),
+  soft `isDeleted` + `deletedAt`. See "Invoices" below.
 - **Transaction** — wallet ledger per Coach. `type` (`COMMISSION | PAYOUT | DEBIT`),
   `amount`, optional `orderId`, `utrReference` (payouts), `status`.
 
@@ -409,6 +418,43 @@ Admin (`@Roles(ADMIN)`), same unread pattern as enquiries:
 - `PATCH /admin/restock/:id/seen` (first open kept) and `PATCH /admin/restock/:id`
   `{ status?, adminNote? (≤ 1000) }` (also marks seen).
 
+## Invoices (`invoices/`)
+
+Admins upload invoice PDFs to a tribe; the tribe sees them under "Invoices" to
+view/download. Shared contract with the frontend: `feat/tribe-invoices` (routes,
+fields, messages fixed — change both sides together). No permission switch.
+- **Files are private.** Same bucket/credentials as image uploads
+  (`UploadsService`), but via its private-object helpers: `putPrivatePdf` →
+  `invoices/<tribeId>/<32 hex>.pdf`, `getPrivateObject` (stream),
+  `deletePrivateObject` (best-effort, logs and swallows). These never build a
+  URL — `S3_PUBLIC_BASE_URL` is not involved — and only accept keys of that
+  shape. The bytes are only ever served by the two authenticated `…/file`
+  endpoints, which pipe the S3 `GetObject` stream (`StreamableFile`, nothing
+  buffered) with `Content-Type: application/pdf`, `Content-Disposition:
+  inline` (or `attachment` with `?download=1`), `filename="<invoiceNumber>.pdf"`
+  sanitised to `[A-Za-z0-9._-]` (`invoice-file.ts`), `nosniff`,
+  `Cache-Control: private, no-store`. **Ensure the bucket policy doesn't make
+  `invoices/*` public** (keys are unguessable, but they're financial documents).
+- **Upload validation**: multer memory storage, 10 MB, one file; PDF by magic
+  bytes `%PDF-` (client mimetype/name ignored) → 400 `Only PDF files are
+  allowed`; multer's 413 is mapped to 400 `PDF must be 10 MB or smaller`
+  (`PdfTooLargeInterceptor`); S3 unset → 503 `File uploads are not configured.`.
+  Upload/replace are throttled 20/min. Invoice date must be ≤ today + 31 days.
+- **Uniqueness**: 409 `Invoice number already exists for this tribe` — checked
+  before uploading (no orphan object) and enforced by the partial unique index
+  (an E11000 race also → 409 and the new object is deleted). Soft delete frees
+  the number.
+- **Viewed**: `viewedAt` is set by a conditional update on the tribe's first
+  successful file open (admin opens don't count); replacing the PDF unsets it.
+  The tribe list returns `unviewed` for the sidebar badge.
+- Responses go through `toInvoiceResponse` (contract fields only; never
+  `fileKey`). Another tribe's, a deleted or a malformed id are all 404.
+- Tests: `invoices.service.spec.ts` (mocked models + S3, plus HTTP-level checks
+  of multer limits/headers through `configureApp`), `uploads.service.spec.ts`
+  (mocked S3 client), and `invoices.int.spec.ts` for the partial index against
+  a real MongoDB (`MONGO_TEST_URI=… npx jest invoices.int`; own
+  `shipkit_invoicetest` database, dropped afterwards). Never touch real S3.
+
 ## API surface (all prefixed `/api`)
 
 - **auth**: `POST /auth/register`, `POST /auth/login` → `{ access_token, user }`
@@ -441,6 +487,15 @@ Admin (`@Roles(ADMIN)`), same unread pattern as enquiries:
   `GET /restock/requests/mine` (tribe); `GET /admin/restock`,
   `GET /admin/restock/unread`, `PATCH /admin/restock/:id/seen`,
   `PATCH /admin/restock/:id` (admin) — see "Restock reminders"
+- **invoices**: tribe — `GET /invoices` → `{ invoices (newest invoiceDate
+  first), unviewed }`, `GET /invoices/:id/file[?download=1]` (own only; sets
+  `viewedAt` once). Admin — `POST /admin/invoices` (multipart `file` + `coachId`,
+  `invoiceNumber`, `invoiceDate`, `amount`, `reference?`, `note?`),
+  `GET /admin/invoices?coachId=` (all tribes → `coachId` populated
+  `{ _id, username, brand, name }`), `PATCH /admin/invoices/:id` (JSON metadata;
+  `null`/`""` clears reference/note), `PUT /admin/invoices/:id/file` (replace PDF,
+  resets `viewedAt`), `DELETE /admin/invoices/:id` → `{ success: true }` (soft),
+  `GET /admin/invoices/:id/file[?download=1]` — see "Invoices"
 - **transactions**: `GET /me` & `GET /my-balance` & `GET /coach` & `GET /balance` (coach),
   `POST /payout` (admin), `GET /` (admin)
 - **whatsapp**: `GET /whatsapp/webhook` (public — Meta's `hub.challenge` handshake,
