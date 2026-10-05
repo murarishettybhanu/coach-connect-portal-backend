@@ -28,6 +28,7 @@ import { Throttle } from '@nestjs/throttler';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-status.dto';
 import { DownloadMediaDto } from './dto/download-media.dto';
+import { DeliverByTrackingDto } from './dto/deliver-by-tracking.dto';
 import { CurrentUserId } from '../../common/decorators/current-user.decorator';
 import { assertOwnedBy } from '../../common/utils/ownership';
 import { AttachAddressDto, UpdateAddressDto } from './dto/attach-address.dto';
@@ -171,6 +172,22 @@ export class OrdersController {
   @Roles(UserRole.ADMIN)
   async downloadMedia(@Body() dto: DownloadMediaDto, @Res() res: Response) {
     await this.ordersService.streamMediaZip(dto.orderIds || [], res);
+  }
+
+  // Admin "Mark delivered" tool: check pasted barcodes (read-only), then mark
+  // the dispatched orders they belong to as delivered.
+  @Post('deliver-by-tracking/preview')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  previewDeliverByTracking(@Body() dto: DeliverByTrackingDto) {
+    return this.ordersService.previewDeliverByTracking(dto.codes);
+  }
+
+  @Post('deliver-by-tracking')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  deliverByTracking(@Body() dto: DeliverByTrackingDto) {
+    return this.ordersService.deliverByTracking(dto.codes);
   }
 
   // Admin: list soft-deleted orders (optionally scoped to a tribe).

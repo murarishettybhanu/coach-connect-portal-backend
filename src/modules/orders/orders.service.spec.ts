@@ -438,6 +438,69 @@ describe('OrdersService.updateStatus transitions', () => {
     const [, update] = orderModel.findOneAndUpdate.mock.calls[0];
     expect(update.$unset).toEqual({ trackingNumber: 1 });
   });
+
+  describe('skipDispatch (Mark Delivered tool)', () => {
+    const opts = { skipDispatch: true };
+    const deliver = (service: OrdersService, o = opts) =>
+      service.updateStatus(
+        ORDER_ID,
+        OrderStatus.DELIVERED,
+        undefined,
+        undefined,
+        o,
+      );
+
+    it.each([OrderStatus.NEW, OrderStatus.PACKED])(
+      'moves a %s order straight to delivered, recording dispatch too',
+      async (from) => {
+        const { service, orderModel, barcodes } = setup();
+        orderModel.findOne.mockReturnValue(query(current(from)));
+        orderModel.findOneAndUpdate.mockReturnValue(
+          query(current(OrderStatus.DELIVERED)),
+        );
+        await deliver(service);
+        const [filter, update] = orderModel.findOneAndUpdate.mock.calls[0];
+        expect(filter).toMatchObject({ status: from });
+        expect(update.$set.status).toBe(OrderStatus.DELIVERED);
+        expect(update.$set.deliveredAt).toBeInstanceOf(Date);
+        expect(
+          update.$push.statusHistory.$each.map((h: any) => h.status),
+        ).toEqual([OrderStatus.DISPATCHED, OrderStatus.DELIVERED]);
+        // No new barcode for a parcel that has already arrived.
+        expect(barcodes.assignToOrder).not.toHaveBeenCalled();
+      },
+    );
+
+    it('is still refused without the flag', async () => {
+      const { service, orderModel } = setup();
+      orderModel.findOne.mockReturnValue(query(current(OrderStatus.PACKED)));
+      await expect(deliver(service, {} as any)).rejects.toThrow(
+        "can't be moved to delivered",
+      );
+    });
+
+    it.each([OrderStatus.RETURNED, OrderStatus.CANCELLED])(
+      'never revives a %s order',
+      async (from) => {
+        const { service, orderModel } = setup();
+        orderModel.findOne.mockReturnValue(query(current(from)));
+        await expect(deliver(service)).rejects.toThrow(
+          "can't be moved to delivered",
+        );
+        expect(orderModel.findOneAndUpdate).not.toHaveBeenCalled();
+      },
+    );
+
+    it('still needs the claim approved', async () => {
+      const { service, orderModel } = setup();
+      orderModel.findOne.mockReturnValue(
+        query(
+          current(OrderStatus.NEW, { approvalStatus: ApprovalStatus.PENDING }),
+        ),
+      );
+      await expect(deliver(service)).rejects.toThrow('Approve this claim');
+    });
+  });
 });
 
 describe('OrdersService.markReturned', () => {
@@ -1090,5 +1153,113 @@ describe('OrdersService — claim confirmation WhatsApp', () => {
     );
     await flush();
     expect(whatsapp.sendTemplateByIdTo).not.toHaveBeenCalled();
+  });
+});
+
+describe('OrdersService — mark delivered by tracking', () => {
+  const ord = (code: string, status: OrderStatus, extra: any = {}) => ({
+    _id: new Types.ObjectId(),
+    trackingNumber: code,
+    status,
+    approvalStatus: ApprovalStatus.APPROVED,
+    shippingAddress: { fullName: 'Asha' },
+    coachId: { brand: 'RV Life' },
+    ...extra,
+  });
+
+  function trackSetup(found: any[]) {
+    const ctx = setup();
+    ctx.orderModel.find.mockReturnValue(query(found));
+    const spy = jest
+      .spyOn(ctx.service, 'updateStatus')
+      .mockResolvedValue({} as any);
+    return { ...ctx, spy };
+  }
+
+  it('classifies every unique code, case- and space-insensitively', async () => {
+    const dup = new Types.ObjectId();
+    const { service, orderModel } = trackSetup([
+      ord('EA100IN', OrderStatus.DISPATCHED),
+      ord('EA200IN', OrderStatus.DELIVERED),
+      ord('EA300IN', OrderStatus.PACKED),
+      ord('EA400IN', OrderStatus.NEW, {
+        approvalStatus: ApprovalStatus.PENDING,
+      }),
+      ord('EA600IN', OrderStatus.RETURNED),
+      ord('EA700IN', OrderStatus.CANCELLED),
+      ord('EA500IN', OrderStatus.DISPATCHED, { _id: dup }),
+      ord('ea500in', OrderStatus.DISPATCHED),
+    ]);
+    const rows = await service.previewDeliverByTracking([
+      'ea100in ',
+      'EA100IN',
+      'EA200IN',
+      'EA300IN',
+      'EA400IN',
+      'EA500IN',
+      'EA600IN',
+      'EA700IN',
+      'EA999IN',
+      '',
+    ]);
+    expect(rows.map((r) => [r.code, r.state])).toEqual([
+      ['EA100IN', 'READY'],
+      ['EA200IN', 'ALREADY_DELIVERED'],
+      ['EA300IN', 'READY'],
+      ['EA400IN', 'AWAITING_APPROVAL'],
+      ['EA500IN', 'MULTIPLE'],
+      ['EA600IN', 'CLOSED'],
+      ['EA700IN', 'CLOSED'],
+      ['EA999IN', 'NOT_FOUND'],
+    ]);
+    expect(rows[0].orders[0]).toMatchObject({
+      customer: 'Asha',
+      tribe: 'RV Life',
+    });
+    // Exact match on the normalised codes and the spellings as typed.
+    const filter = orderModel.find.mock.calls[0][0];
+    expect(filter.trackingNumber.$in).toEqual(
+      expect.arrayContaining(['EA100IN', 'ea100in', 'EA999IN']),
+    );
+    expect(filter.isDeleted).toEqual({ $ne: true });
+  });
+
+  it('marks only READY orders delivered, via updateStatus, and reports failures', async () => {
+    const a = ord('EA100IN', OrderStatus.DISPATCHED);
+    const b = ord('EA200IN', OrderStatus.DISPATCHED);
+    const c = ord('EA300IN', OrderStatus.PACKED);
+    const { service, spy } = trackSetup([a, b, c]);
+    spy.mockImplementation(async (id: string) => {
+      if (id === String(b._id)) throw new Error('This order changed');
+      return {} as any;
+    });
+    const rows = await service.deliverByTracking([
+      'EA100IN',
+      'EA200IN',
+      'EA300IN',
+      'EA100IN',
+    ]);
+    expect(spy).toHaveBeenCalledTimes(3);
+    expect(spy).toHaveBeenCalledWith(
+      String(a._id),
+      OrderStatus.DELIVERED,
+      undefined,
+      undefined,
+      { skipDispatch: true },
+    );
+    expect(rows.map((r) => r.state)).toEqual([
+      'DELIVERED',
+      'FAILED',
+      'DELIVERED',
+    ]);
+    expect(rows[1].error).toBe('This order changed');
+  });
+
+  it('refuses more than the cap of different codes', async () => {
+    const { service } = trackSetup([]);
+    const many = Array.from({ length: 1001 }, (_, i) => `EA${i}IN`);
+    await expect(service.previewDeliverByTracking(many)).rejects.toThrow(
+      'Up to 1000',
+    );
   });
 });

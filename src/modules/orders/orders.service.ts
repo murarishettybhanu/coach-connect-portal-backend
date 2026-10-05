@@ -21,6 +21,7 @@ import { BarcodesService } from '../barcodes/barcodes.service';
 import { BarcodeType } from '../../schemas/barcode.schema';
 import { WhatsappOtpService } from '../whatsapp/whatsapp-otp.service';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
+import { MAX_TRACKING_CODES, uniqueCodes } from './tracking-codes';
 import { titleCaseName } from '../../common/utils/name.util';
 import { isAllowedMediaUrl } from '../../common/utils/media-url';
 import { pageSizeOf } from '../../common/utils/pagination.util';
@@ -59,6 +60,30 @@ export const ALLOWED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   [OrderStatus.DELIVERED]: [],
   [OrderStatus.RETURNED]: [],
   [OrderStatus.CANCELLED]: [],
+};
+
+export type TrackingDeliveryState =
+  | 'READY'
+  | 'ALREADY_DELIVERED'
+  | 'CLOSED'
+  | 'AWAITING_APPROVAL'
+  | 'MULTIPLE'
+  | 'NOT_FOUND'
+  // after a run
+  | 'DELIVERED'
+  | 'FAILED';
+
+export type TrackingDeliveryRow = {
+  code: string;
+  state: TrackingDeliveryState;
+  orders: {
+    _id: string;
+    customer: string;
+    tribe: string;
+    status: string;
+    approvalStatus: string | null;
+  }[];
+  error?: string;
 };
 
 // Media ZIP limits: customer photos are a few MB; anything far beyond is not one.
@@ -1370,6 +1395,9 @@ export class OrdersService {
     status: OrderStatus,
     trackingNumber?: string,
     deliveryType?: BarcodeType,
+    // Admin "Mark Delivered" tool only: a New / Ready to Ship order may go
+    // straight to Delivered (the parcel is known to have arrived).
+    opts: { skipDispatch?: boolean } = {},
   ): Promise<Order> {
     const now = new Date();
     const order = await this.orderModel
@@ -1380,7 +1408,14 @@ export class OrdersService {
     // Validate the move before anything is claimed or changed. Going backwards
     // is revert-status's job; a return is logged with POST /orders/returned.
     const previousStatus = order.status;
-    if (!(ALLOWED_TRANSITIONS[previousStatus] || []).includes(status)) {
+    const skippingDispatch =
+      !!opts.skipDispatch &&
+      status === OrderStatus.DELIVERED &&
+      (previousStatus === OrderStatus.NEW || previousStatus === OrderStatus.PACKED);
+    if (
+      !skippingDispatch &&
+      !(ALLOWED_TRANSITIONS[previousStatus] || []).includes(status)
+    ) {
       throw new BadRequestException(
         `A ${previousStatus.toLowerCase()} order can't be moved to ${status.toLowerCase()}`,
       );
@@ -1445,7 +1480,18 @@ export class OrdersService {
         {
           $set,
           ...(Object.keys($unset).length ? { $unset } : {}),
-          $push: { statusHistory: { status, at: now } },
+          // Skipping dispatch still records it, so reports that count shipped
+          // parcels (analytics, restock pace) see this one.
+          $push: {
+            statusHistory: skippingDispatch
+              ? {
+                  $each: [
+                    { status: OrderStatus.DISPATCHED, at: now, note: 'Marked delivered from barcode list' },
+                    { status, at: now, note: 'Marked delivered from barcode list' },
+                  ],
+                }
+              : { status, at: now },
+          },
         },
         { new: true },
       )
@@ -1557,6 +1603,96 @@ export class OrdersService {
         `Could not send the ${status} WhatsApp update for order ${orderId}: ${(err as Error).message}`,
       );
     }
+  }
+
+  /**
+   * Admin "Mark delivered" tool, step 1: what each pasted barcode / tracking
+   * number points at, and whether it can be marked delivered. Read-only.
+   *
+   *   READY             one New / Ready to Ship / Dispatched order — will be marked delivered
+   *   ALREADY_DELIVERED nothing to do
+   *   CLOSED            returned or cancelled — left alone
+   *   AWAITING_APPROVAL a claim not yet approved
+   *   MULTIPLE          the code is on more than one order — left alone
+   *   NOT_FOUND         no (non-deleted) order carries it
+   */
+  async previewDeliverByTracking(rawCodes: string[]): Promise<TrackingDeliveryRow[]> {
+    const codes = uniqueCodes(rawCodes);
+    if (codes.length > MAX_TRACKING_CODES) {
+      throw new BadRequestException(
+        `Up to ${MAX_TRACKING_CODES} different codes at a time — split the list`,
+      );
+    }
+    if (!codes.length) return [];
+    // Barcodes are stored uppercase; a hand-typed tracking number is stored as
+    // typed (trimmed). Exact $in on both spellings keeps the trackingNumber index.
+    const candidates = [
+      ...new Set([...codes, ...rawCodes.map((r) => String(r ?? '').trim()).filter(Boolean)]),
+    ];
+    const orders: any[] = await this.orderModel
+      .find({ isDeleted: { $ne: true }, trackingNumber: { $in: candidates } } as any)
+      .select('trackingNumber status approvalStatus shippingAddress.fullName coachId type')
+      .populate('coachId', 'brand name')
+      .lean()
+      .exec();
+
+    const byCode = new Map<string, any[]>();
+    for (const o of orders) {
+      const key = String(o.trackingNumber ?? '').trim().toUpperCase();
+      const list = byCode.get(key) ?? [];
+      if (!list.some((x) => String(x._id) === String(o._id))) list.push(o);
+      byCode.set(key, list);
+    }
+
+    return codes.map((code) => {
+      const matches = byCode.get(code) ?? [];
+      if (matches.length === 0) return { code, state: 'NOT_FOUND', orders: [] };
+      const summary = matches.map((o) => ({
+        _id: String(o._id),
+        customer: o.shippingAddress?.fullName ?? '',
+        tribe: o.coachId?.brand || o.coachId?.name || '',
+        status: o.status,
+        approvalStatus: o.approvalStatus ?? null,
+      }));
+      if (matches.length > 1) return { code, state: 'MULTIPLE', orders: summary };
+      const o = matches[0];
+      const state: TrackingDeliveryState =
+        o.status === OrderStatus.DELIVERED
+          ? 'ALREADY_DELIVERED'
+          : o.approvalStatus === ApprovalStatus.PENDING
+            ? 'AWAITING_APPROVAL'
+            : o.status === OrderStatus.RETURNED || o.status === OrderStatus.CANCELLED
+              ? 'CLOSED'
+              : 'READY';
+      return { code, state, orders: summary };
+    });
+  }
+
+  /**
+   * Step 2: marks every READY code's order delivered, through updateStatus — so
+   * status history and the customer's "delivered" WhatsApp are exactly as when
+   * the admin moves the card — except that New / Ready to Ship orders may skip
+   * Dispatched (`skipDispatch`). Codes in any other state are reported, not
+   * touched. One failure doesn't stop the rest.
+   */
+  async deliverByTracking(rawCodes: string[]): Promise<TrackingDeliveryRow[]> {
+    const rows = await this.previewDeliverByTracking(rawCodes);
+    for (const row of rows) {
+      if (row.state !== 'READY') continue;
+      try {
+        await this.updateStatus(row.orders[0]._id, OrderStatus.DELIVERED, undefined, undefined, {
+          skipDispatch: true,
+        });
+        row.state = 'DELIVERED';
+        row.orders[0].status = OrderStatus.DELIVERED;
+      } catch (err) {
+        row.state = 'FAILED';
+        row.error = (err as Error).message;
+      }
+    }
+    const done = rows.filter((r) => r.state === 'DELIVERED').length;
+    this.logger.log(`Mark delivered by tracking: ${done} of ${rows.length} codes delivered`);
+    return rows;
   }
 
   /**

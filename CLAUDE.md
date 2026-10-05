@@ -543,6 +543,12 @@ fields, messages fixed — change both sides together). No permission switch.
   `POST /`, `PATCH /:id`, `DELETE /:id` (admin only; validated DTOs,
   `kitPrice?: number | null`)
 - **orders**: `GET /me` & `GET /coach` (coach), `GET /pending-approvals` (admin/coach),
+  `POST /deliver-by-tracking/preview` + `POST /deliver-by-tracking` (admin; `{ codes }`, up to 1000
+  unique, case/space-insensitive; one row per code: READY (New / Ready to Ship / Dispatched) /
+  ALREADY_DELIVERED / CLOSED (returned, cancelled) / AWAITING_APPROVAL / MULTIPLE / NOT_FOUND, then
+  DELIVERED / FAILED — READY ones go through `updateStatus(…, { skipDispatch: true })`: New / Ready to
+  Ship may jump to Delivered (history gets a DISPATCHED + DELIVERED entry so shipped counts stay right;
+  only the delivered WhatsApp is sent). The board's own transitions are unchanged),
   `POST /` (public checkout), `GET /` (admin), `GET /:id`, `PATCH /:id/status` (admin),
   `PATCH /:id/approve` & `PATCH /:id/reject` (admin/coach)
 - **tribe-members** (admin only): `GET /tribe-members?coachId=<id,id>&search=&page=&limit=`
