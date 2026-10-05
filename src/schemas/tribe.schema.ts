@@ -60,6 +60,11 @@ export class Tribe extends Document {
 
   @Prop({ default: true })
   isActive: boolean;
+
+  // Tribe Portal features an admin has switched on for this tribe; anything
+  // missing falls back to its default (see common/tribe-permissions.ts).
+  @Prop({ type: Object, default: {} })
+  permissions: Record<string, boolean>;
 }
 
 export const TribeSchema = SchemaFactory.createForClass(Tribe);

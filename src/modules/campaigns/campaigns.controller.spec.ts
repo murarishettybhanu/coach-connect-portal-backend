@@ -21,6 +21,7 @@ function setup(
   };
   const tribesService = {
     findIdByUserId: jest.fn().mockResolvedValue(MY_TRIBE),
+    assertPermission: jest.fn().mockResolvedValue(undefined),
   };
   return {
     controller: new CampaignsController(
@@ -28,6 +29,7 @@ function setup(
       tribesService as any,
     ),
     campaignsService,
+    tribesService,
   };
 }
 
@@ -55,6 +57,35 @@ describe('CampaignsController.create', () => {
     await expect(
       controller.create({ ...body, coachId: undefined }, adminReq, 'admin1'),
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+describe('CampaignsController campaign permission', () => {
+  it('a tribe needs the campaigns permission to create or edit; admins never do', async () => {
+    const { controller, tribesService } = setup();
+    tribesService.assertPermission.mockRejectedValue(
+      new ForbiddenException('not enabled'),
+    );
+    const tribeReq = { user: { role: UserRole.TRIBE } };
+    await expect(
+      controller.create({ name: 'X' } as any, tribeReq, 'u1'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(
+      controller.update('c1', {} as any, tribeReq, 'u1'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(tribesService.assertPermission).toHaveBeenCalledWith(
+      MY_TRIBE,
+      'campaigns',
+      expect.any(String),
+    );
+
+    tribesService.assertPermission.mockClear();
+    await controller.create(
+      { name: 'X', coachId: MY_TRIBE } as any,
+      { user: { role: UserRole.ADMIN } },
+      'admin',
+    );
+    expect(tribesService.assertPermission).not.toHaveBeenCalled();
   });
 });
 

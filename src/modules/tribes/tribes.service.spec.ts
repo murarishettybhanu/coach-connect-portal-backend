@@ -128,3 +128,23 @@ describe('TribesService.update', () => {
     expect(update.$set.storefrontConfig).toEqual({ theme: null });
   });
 });
+
+describe('TribesService.updatePermissions', () => {
+  it('merges onto the effective permissions and writes them all', async () => {
+    const { service, tribeModel } = setup();
+    tribeModel.findById.mockReturnValue({
+      select: () => ({
+        lean: () => ({ exec: async () => ({ permissions: {} }) }),
+      }),
+    });
+    tribeModel.updateOne = jest.fn(() => exec({}));
+    const expected = { members: true, campaigns: true, storefront: true };
+    await expect(
+      service.updatePermissions('t1', { members: true }),
+    ).resolves.toEqual(expected);
+    expect(tribeModel.updateOne).toHaveBeenCalledWith(
+      { _id: 't1' },
+      { $set: { permissions: expected } },
+    );
+  });
+});

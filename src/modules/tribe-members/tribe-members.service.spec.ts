@@ -1,4 +1,8 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Types } from 'mongoose';
 import { TribeMembersService } from './tribe-members.service';
 
@@ -37,7 +41,9 @@ function setup() {
     updateOne: jest.fn(() => query({ matchedCount: 1 })),
   };
   const tribeModel: any = {
-    findOne: jest.fn(() => query({ _id: TRIBE })),
+    findOne: jest.fn(() =>
+      query({ _id: TRIBE, permissions: { members: true } }),
+    ),
   };
   return {
     service: new TribeMembersService(memberModel, orderModel, tribeModel),
@@ -342,6 +348,21 @@ describe('TribeMembersService reads', () => {
     tribeModel.findOne.mockReturnValue(query(null));
     await expect(service.tribeIdForUser('u2')).rejects.toBeInstanceOf(
       NotFoundException,
+    );
+  });
+
+  it('refuses a tribe whose admin has not enabled Tribe Members (off by default)', async () => {
+    const { service, tribeModel } = setup();
+    tribeModel.findOne.mockReturnValue(
+      query({ _id: TRIBE, permissions: { members: false } }),
+    );
+    await expect(service.tribeIdForUser('u1')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    // Never set at all → the default, which is off.
+    tribeModel.findOne.mockReturnValue(query({ _id: TRIBE }));
+    await expect(service.tribeIdForUser('u1')).rejects.toBeInstanceOf(
+      ForbiddenException,
     );
   });
 

@@ -21,6 +21,10 @@ import { CreateCampaignDto, UpdateCampaignDto } from './dto/campaign.dto';
 import { CurrentUserId } from '../../common/decorators/current-user.decorator';
 import { assertOwnedBy, refIdOf } from '../../common/utils/ownership';
 
+// Shown when an admin has switched off campaign editing for the tribe.
+const CAMPAIGNS_OFF =
+  'Creating and editing campaigns is not enabled for your tribe. Contact the Tribe Merchandise team.';
+
 @Controller('campaigns')
 export class CampaignsController {
   constructor(
@@ -48,6 +52,7 @@ export class CampaignsController {
     let coachId = dto.coachId;
     if (req.user.role !== UserRole.ADMIN) {
       coachId = await this.tribesService.findIdByUserId(userId);
+      await this.tribesService.assertPermission(coachId, 'campaigns', CAMPAIGNS_OFF);
     }
     if (!coachId) throw new BadRequestException('coachId is required');
     return this.campaignsService.create(dto, coachId);
@@ -86,6 +91,7 @@ export class CampaignsController {
       // A tribe may only edit its OWN campaigns and cannot reassign ownership.
       const tribeId = await this.tribesService.findIdByUserId(userId);
       assertOwnedBy(owner, tribeId, 'Not authorized to update this campaign');
+      await this.tribesService.assertPermission(tribeId, 'campaigns', CAMPAIGNS_OFF);
       // Stopping is final for a tribe; only an admin can reactivate a stopped campaign.
       if (
         campaign.status === CampaignStatus.STOPPED &&

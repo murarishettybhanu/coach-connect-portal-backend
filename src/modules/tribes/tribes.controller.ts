@@ -15,7 +15,11 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../schemas/user.schema';
-import { TRIBE_EDITABLE, UpdateTribeDto } from './dto/update-tribe.dto';
+import {
+  TRIBE_EDITABLE,
+  UpdateTribeDto,
+  UpdateTribePermissionsDto,
+} from './dto/update-tribe.dto';
 import { CurrentUserId } from '../../common/decorators/current-user.decorator';
 
 @Controller('tribes')
@@ -79,6 +83,17 @@ export class TribesController {
       }
     }
     return this.tribesService.update(id, patch);
+  }
+
+  // Admin: switch Tribe Portal features (e.g. Tribe Members) on or off.
+  @Patch(':id/permissions')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  updatePermissions(
+    @Param('id') id: string,
+    @Body() dto: UpdateTribePermissionsDto,
+  ) {
+    return this.tribesService.updatePermissions(id, dto);
   }
 
   // Admin: set a new login password for a tribe's account.

@@ -1,4 +1,5 @@
 import {
+  ForbiddenException,
   Injectable,
   NotFoundException,
   ConflictException,
@@ -15,6 +16,11 @@ import { MailService } from '../mail/mail.service';
 import { UserRole } from '../../schemas/user.schema';
 import { generateStrongPassword } from '../../common/utils/password.util';
 import { UpdateTribeDto } from './dto/update-tribe.dto';
+import {
+  resolvePermissions,
+  TRIBE_PERMISSIONS,
+  type TribePermissions,
+} from '../../common/tribe-permissions';
 
 // Tribe-document fields PATCH /tribes/:id may write (email/phone live on User).
 const TRIBE_FIELDS = [
@@ -31,7 +37,6 @@ const TRIBE_FIELDS = [
   'bankingDetails',
   'storefrontConfig',
 ] as const;
-
 @Injectable()
 export class TribesService {
   constructor(
@@ -150,7 +155,12 @@ export class TribesService {
     }
     const balance = await this.transactionsService.getBalance(coach._id as any);
     const coachObj = coach.toObject();
-    return { ...coachObj, walletBalance: balance };
+    return {
+      ...coachObj,
+      walletBalance: balance,
+      // Effective (defaults applied) — the portal shows/hides features by it.
+      permissions: resolvePermissions(coachObj.permissions),
+    };
   }
 
   async findOne(id: string): Promise<any> {
@@ -160,7 +170,43 @@ export class TribesService {
     }
     const balance = await this.transactionsService.getBalance(coach._id as any);
     const coachObj = coach.toObject();
-    return { ...coachObj, walletBalance: balance };
+    return {
+      ...coachObj,
+      walletBalance: balance,
+      permissions: resolvePermissions(coachObj.permissions),
+    };
+  }
+
+  /** A tribe's effective permissions (defaults applied). */
+  async permissionsOf(tribeId: string): Promise<TribePermissions> {
+    const tribe = await this.tribeModel.findById(tribeId).select('permissions').lean().exec();
+    if (!tribe) throw new NotFoundException(`Tribe with ID ${tribeId} not found`);
+    return resolvePermissions(tribe.permissions);
+  }
+
+  /** 403 unless an admin has this permission switched on for the tribe. */
+  async assertPermission(
+    tribeId: string,
+    key: keyof TribePermissions,
+    message: string,
+  ): Promise<void> {
+    if (!(await this.permissionsOf(tribeId))[key]) throw new ForbiddenException(message);
+  }
+
+  /** Admin: switch Tribe Portal features on/off for a tribe (merged). */
+  async updatePermissions(
+    id: string,
+    changes: Partial<TribePermissions>,
+  ): Promise<TribePermissions> {
+    const tribe = await this.tribeModel.findById(id).select('permissions').lean().exec();
+    if (!tribe) throw new NotFoundException(`Tribe with ID ${id} not found`);
+    const next = resolvePermissions(tribe.permissions);
+    for (const p of TRIBE_PERMISSIONS) {
+      const v = (changes as any)[p.key];
+      if (typeof v === 'boolean') next[p.key] = v;
+    }
+    await this.tribeModel.updateOne({ _id: id } as any, { $set: { permissions: next } }).exec();
+    return next;
   }
 
   // PUBLIC storefront lookup — must only expose display fields. Never return
@@ -169,13 +215,19 @@ export class TribesService {
     const tribe = await this.tribeModel
       .findOne({ username })
       .select(
-        'username brand name bio tagline socialLinks contactEmail profileImage logoUrl storefrontConfig isActive',
+        'username brand name bio tagline socialLinks contactEmail profileImage logoUrl storefrontConfig isActive permissions',
       )
+      .lean()
       .exec();
     if (!tribe) {
       throw new NotFoundException(`Tribe with username ${username} not found`);
     }
-    return tribe;
+    // Only the one flag the storefront page needs — never the full set.
+    const { permissions, ...display } = tribe as any;
+    return {
+      ...display,
+      storefrontEnabled: resolvePermissions(permissions).storefront,
+    };
   }
 
   // `tribeData` is an UpdateTribeDto already narrowed to what the caller may

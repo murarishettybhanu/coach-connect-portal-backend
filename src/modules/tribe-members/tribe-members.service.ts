@@ -1,9 +1,15 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, isValidObjectId } from 'mongoose';
 import { TribeMember } from '../../schemas/tribe-member.schema';
 import { Order } from '../../schemas/order.schema';
 import { Tribe } from '../../schemas/tribe.schema';
+import { resolvePermissions } from '../../common/tribe-permissions';
 import { pageSizeOf } from '../../common/utils/pagination.util';
 import { coachIdsFilter } from '../../common/utils/coach-ids.util';
 import {
@@ -48,14 +54,22 @@ export class TribeMembersService {
     @InjectModel(Tribe.name) private tribeModel: Model<Tribe>,
   ) {}
 
-  /** The tribe a TRIBE user owns, or a 404 if their account has none. */
+  /**
+   * The tribe a TRIBE user owns — 404 if their account has none, 403 if an
+   * admin hasn't switched on the Tribe Members permission for it.
+   */
   async tribeIdForUser(userId: string): Promise<string> {
     const tribe = await this.tribeModel
       .findOne({ userId } as any)
-      .select('_id')
+      .select('_id permissions')
       .lean()
       .exec();
     if (!tribe) throw new NotFoundException('Tribe not found');
+    if (!resolvePermissions((tribe as any).permissions).members) {
+      throw new ForbiddenException(
+        'Tribe Members is not enabled for your tribe. Contact the Tribe Merchandise team.',
+      );
+    }
     return String(tribe._id);
   }
 

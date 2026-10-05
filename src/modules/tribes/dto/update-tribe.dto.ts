@@ -135,3 +135,16 @@ export const TRIBE_EDITABLE: (keyof UpdateTribeDto)[] = [
   'bankingDetails',
   'storefrontConfig',
 ];
+
+/**
+ * PATCH /tribes/:id/permissions (admin only). One optional boolean per
+ * permission in common/tribe-permissions.ts; omitted ones are left as they are.
+ */
+export class UpdateTribePermissionsDto {
+  // "Tribe Members" page in the Tribe Portal.
+  @IsOptional() @IsBoolean() members?: boolean;
+  // Creating and editing their own campaigns.
+  @IsOptional() @IsBoolean() campaigns?: boolean;
+  // The public storefront and its checkout.
+  @IsOptional() @IsBoolean() storefront?: boolean;
+}

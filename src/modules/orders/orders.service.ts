@@ -27,6 +27,7 @@ import { pageSizeOf } from '../../common/utils/pagination.util';
 import { coachIdsFilter } from '../../common/utils/coach-ids.util';
 import { MAX_MEDIA_ORDERS } from './dto/download-media.dto';
 import { TribeMembersService } from '../tribe-members/tribe-members.service';
+import { TribesService } from '../tribes/tribes.service';
 
 // A rejected claim is dead: no dispatch, no commission. Order listings exclude
 // them so the tables only hold work that still matters. `$ne` also matches the
@@ -111,6 +112,8 @@ export class OrdersService {
     @InjectModel(TribeKit.name) private kitModel: Model<TribeKit>,
     // Links each order to its tribe member (coachId + phone).
     private members: TribeMembersService,
+    // Read-only: a storefront order needs the tribe's storefront permission.
+    private tribes: TribesService,
   ) {}
 
   /**
@@ -351,6 +354,15 @@ export class OrdersService {
     });
     // Schema validation up front too, so a bad document never costs stock.
     await order.validate();
+
+    // A storefront order (no campaign) needs the tribe's storefront switched
+    // on. Staff placing an order by hand are not held to it.
+    if (!campaign && coachId && !opts.trusted) {
+      const allowed = await this.tribes.permissionsOf(coachId);
+      if (!allowed.storefront) {
+        throw new BadRequestException('This store is not taking orders right now');
+      }
+    }
 
     // Pass 2 — the writes. Track each so a failure can put everything back.
     const decremented: { id: string; qty: number; size?: string }[] = [];

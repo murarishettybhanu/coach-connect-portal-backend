@@ -73,6 +73,11 @@ function setup() {
   const otp = { checkProof: jest.fn().mockReturnValue({ ok: true }) };
   const whatsapp = { canSend: false, sendTemplateByIdTo: jest.fn() };
   const members = { recordOrder: jest.fn().mockResolvedValue(null) };
+  const tribes = {
+    permissionsOf: jest
+      .fn()
+      .mockResolvedValue({ members: false, campaigns: true, storefront: true }),
+  };
 
   const service = new OrdersService(
     orderModel,
@@ -84,9 +89,11 @@ function setup() {
     whatsapp as any,
     kitModel,
     members as any,
+    tribes as any,
   );
   return {
     service,
+    tribes,
     orderModel,
     campaignModel,
     products,
@@ -110,6 +117,32 @@ const storeOrder = {
 };
 
 describe('OrdersService.create', () => {
+  it('refuses a storefront order when the tribe’s storefront is switched off', async () => {
+    const { service, products, tribes } = setup();
+    tribes.permissionsOf.mockResolvedValue({
+      members: false,
+      campaigns: true,
+      storefront: false,
+    });
+    await expect(
+      service.create({ ...storeOrder, items: [item()] }),
+    ).rejects.toThrow('This store is not taking orders right now');
+    expect(tribes.permissionsOf).toHaveBeenCalledWith(TRIBE_ID);
+    expect(products.decrementStock).not.toHaveBeenCalled();
+  });
+
+  it('lets staff place a storefront order by hand even when it is off', async () => {
+    const { service, orderModel, tribes } = setup();
+    tribes.permissionsOf.mockResolvedValue({
+      members: false,
+      campaigns: true,
+      storefront: false,
+    });
+    orderModel.save.mockResolvedValue({ _id: 'o1' });
+    await service.create({ ...storeOrder, items: [item()] }, { trusted: true });
+    expect(tribes.permissionsOf).not.toHaveBeenCalled();
+  });
+
   it('validates the address before any stock moves', async () => {
     const { service, products } = setup();
     await expect(
