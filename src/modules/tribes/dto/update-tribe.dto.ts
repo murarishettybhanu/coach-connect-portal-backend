@@ -147,4 +147,6 @@ export class UpdateTribePermissionsDto {
   @IsOptional() @IsBoolean() campaigns?: boolean;
   // The public storefront and its checkout.
   @IsOptional() @IsBoolean() storefront?: boolean;
+  // The Analytics dashboard in the Tribe Portal.
+  @IsOptional() @IsBoolean() analytics?: boolean;
 }

@@ -5,9 +5,14 @@ import { validate } from 'class-validator';
 import { UpdateTribePermissionsDto } from '../modules/tribes/dto/update-tribe.dto';
 
 describe('tribe permissions', () => {
-  const DEFAULTS = { members: false, campaigns: true, storefront: true };
+  const DEFAULTS = {
+    members: false,
+    campaigns: true,
+    storefront: true,
+    analytics: false,
+  };
 
-  it('Tribe Members is off by default; campaigns and storefront are on', () => {
+  it('Tribe Members and Analytics are off by default; campaigns and storefront are on', () => {
     expect(resolvePermissions(undefined)).toEqual(DEFAULTS);
     expect(resolvePermissions(null)).toEqual(DEFAULTS);
     expect(resolvePermissions({})).toEqual(DEFAULTS);

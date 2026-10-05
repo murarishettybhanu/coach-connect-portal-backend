@@ -104,6 +104,7 @@ src/
     tribe-members/ # Customers per tribe, derived from orders (admin read-only)
     restock/     # Stock-health overview for tribes + restock requests to the admin
     invoices/    # Admin-uploaded invoice PDFs per tribe (private S3, streamed)
+    analytics/   # Tribe analytics dashboard (read-only aggregations)
   scripts/       # One-off maintenance scripts run with ts-node (backfills)
 ```
 
@@ -393,7 +394,8 @@ for each of the tribe's non-deleted products and non-deleted TribeKits —
   shortfall when stock is negative.
 
 Implementation notes: one `orders.find` per overview covers the whole 28-day
-window (`statusHistory` `$elemMatch`, uses the `statusHistory.status/at` index)
+window (the query and the 7d/28d split live in `restock/dispatch-counts.ts`,
+shared with the analytics dashboard; `statusHistory` `$elemMatch`, uses the `statusHistory.status/at` index)
 and is split into 7d/28d in memory; the tribe's kit-linked campaigns are looked
 up once. `RestockModule` injects its models with `MongooseModule.forFeature`
 and imports no other feature module, so it can't create a DI cycle.
@@ -417,6 +419,70 @@ Admin (`@Roles(ADMIN)`), same unread pattern as enquiries:
   username), itemsCount, createdAt }] }` (≤ 5). Unread = NEW and no `seenAt`.
 - `PATCH /admin/restock/:id/seen` (first open kept) and `PATCH /admin/restock/:id`
   `{ status?, adminNote? (≤ 1000) }` (also marks seen).
+
+## Analytics (`analytics/`)
+
+The tribe's analytics dashboard (`GET /analytics/tribe`). Shared contract with
+the frontend: `feat/tribe-analytics` — names, params and shapes are fixed,
+change both sides together. Read-only; every number is for the caller's own
+tribe and **soft-deleted orders are excluded everywhere**.
+
+**Definitions** (`analytics.service.ts`, range/bucket maths in `analytics-range.ts`):
+- Time zone **Asia/Kolkata** for days/weeks/months; weeks start **Monday**.
+  Range = `[00:00 IST on from, 00:00 IST the day after to)`.
+- Event counts (in range) come from `statusHistory`: **dispatched** / **delivered**
+  / **returned** = orders with a DISPATCHED / DELIVERED / RETURNED entry in the
+  range. One per order per event: the **first such entry inside the range**
+  counts (and picks the bucket), so KPIs always equal the sum of the trend.
+- **totalOrders** = orders created (`createdAt`) in range, rejected claims
+  (`approvalStatus` REJECTED) excluded.
+- Snapshots ("now", not range-bound): **inTransit** = status DISPATCHED;
+  **pending** = status NEW/PACKED and not rejected (includes claims awaiting
+  approval); **pendingApproval** = the pending ones with `approvalStatus` PENDING.
+- **returnRate** = returned / dispatched, 0 when dispatched is 0, 4 dp, capped
+  at 1 (returns in range can come from dispatches before it). Same per item.
+- Units = order-line quantity; lines with `selected: false` never count. A kit
+  unit = one order of a campaign whose `kitId` is the kit.
+- Items: every non-deleted product and kit — `dispatchedUnits` / `deliveredUnits`
+  / `returnedUnits` in range, `consumedUnits` = `dispatchedUnits`, `stock`
+  (product `stockLevel`, may be negative; kit = `buildableKits`), and `level` /
+  `daysLeft` **exactly as the restock overview** ("now": pace from the 28 days
+  before now — same `restock-math.ts` and the same `restock/dispatch-counts.ts`
+  helpers the restock service uses). Sorted kits first, then products, each by
+  `dispatchedUnits` desc then name. `stockAlerts` counts OUT/CRITICAL/LOW items.
+- Filters `productIds` / `kitIds` (comma-separated, the caller's own non-deleted
+  items, else 400): KPIs (snapshots included) and the trend count only orders
+  holding a ticked line of a selected product **or** belonging to a campaign
+  linked to a selected kit; `items` is limited to the selected ones.
+- Range: `from`/`to` are IST dates (YYYY-MM-DD). Default = last 30 days incl.
+  today (IST). Missing `from` = 29 days before `to`; missing `to` = today.
+  400 if from > to or the span (calendar days, inclusive) is over 400.
+  `granularity` default: day ≤ 45 days, week ≤ 180, else month.
+- `trend` has **every** bucket touching the range, zero-filled in Node; a week /
+  month bucket starts on its Monday / 1st, which may be before `from`.
+
+Implementation notes: round trips are fixed whatever the range or item count —
+tribe lookup, then products, kits (+ populate), kit-linked campaigns and the
+28-day pace `find` in parallel, then **one** `orders.aggregate`: a `$match`
+(tribe, not deleted, created in range OR an event entry in range OR in a
+snapshot status, plus the filter), a `$project` computing each event's first
+in-range time, and a `$facet` (created / event buckets via `$dateTrunc` with
+`timezone: 'Asia/Kolkata'` and `startOfWeek: 'monday'` / units per product /
+orders per campaign / snapshot counts). `AnalyticsModule` injects its models
+with `MongooseModule.forFeature` and imports no other feature module.
+Tests: `analytics-range.spec.ts`, `analytics.service.spec.ts` (mocked models),
+and `analytics.int.spec.ts` for the aggregation against a real MongoDB
+(`MONGO_TEST_URI=… npx jest analytics.int`; own `shipkit_analyticstest`
+database, dropped afterwards).
+
+**API** — `GET /analytics/tribe?from=&to=&granularity=&productIds=&kitIds=`
+(`@Roles(TRIBE)`, tribe from the session; unknown params are 400) →
+`{ range: { from, to, granularity, timezone }, kpis: { totalOrders, dispatched,
+delivered, returned, returnRate, inTransit, pending, pendingApproval }, trend:
+[{ bucket (IST start date), label ('05 Oct' | 'Wk of 29 Sep' | 'Oct 2026'),
+orders, dispatched, delivered, returned }], items: [{ kind, id, name,
+dispatchedUnits, deliveredUnits, returnedUnits, returnRate, stock,
+consumedUnits, level, daysLeft }], stockAlerts: { OUT, CRITICAL, LOW } }`.
 
 ## Invoices (`invoices/`)
 
@@ -487,6 +553,8 @@ fields, messages fixed — change both sides together). No permission switch.
   `GET /restock/requests/mine` (tribe); `GET /admin/restock`,
   `GET /admin/restock/unread`, `PATCH /admin/restock/:id/seen`,
   `PATCH /admin/restock/:id` (admin) — see "Restock reminders"
+- **analytics** (tribe): `GET /analytics/tribe?from=&to=&granularity=&productIds=&kitIds=`
+  — see "Analytics"
 - **invoices**: tribe — `GET /invoices` → `{ invoices (newest invoiceDate
   first), unviewed }`, `GET /invoices/:id/file[?download=1]` (own only; sets
   `viewedAt` once). Admin — `POST /admin/invoices` (multipart `file` + `coachId`,

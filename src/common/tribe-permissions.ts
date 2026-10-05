@@ -25,6 +25,11 @@ export const TRIBE_PERMISSIONS = [
     // forms are unaffected.
     default: true,
   },
+  {
+    key: 'analytics',
+    // The Analytics dashboard (GET /analytics/tribe).
+    default: false,
+  },
 ] as const;
 
 export type TribePermissionKey = (typeof TRIBE_PERMISSIONS)[number]['key'];

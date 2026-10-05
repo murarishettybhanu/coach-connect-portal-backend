@@ -138,7 +138,12 @@ describe('TribesService.updatePermissions', () => {
       }),
     });
     tribeModel.updateOne = jest.fn(() => exec({}));
-    const expected = { members: true, campaigns: true, storefront: true };
+    const expected = {
+      members: true,
+      campaigns: true,
+      storefront: true,
+      analytics: false,
+    };
     await expect(
       service.updatePermissions('t1', { members: true }),
     ).resolves.toEqual(expected);

@@ -22,6 +22,7 @@ import { WhatsappModule } from './modules/whatsapp/whatsapp.module';
 import { TribeMembersModule } from './modules/tribe-members/tribe-members.module';
 import { RestockModule } from './modules/restock/restock.module';
 import { InvoicesModule } from './modules/invoices/invoices.module';
+import { AnalyticsModule } from './modules/analytics/analytics.module';
 
 @Module({
   imports: [
@@ -55,6 +56,7 @@ import { InvoicesModule } from './modules/invoices/invoices.module';
     TribeMembersModule,
     RestockModule,
     InvoicesModule,
+    AnalyticsModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],
