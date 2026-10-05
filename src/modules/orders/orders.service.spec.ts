@@ -102,6 +102,7 @@ function setup() {
     otp,
     kitModel,
     members,
+    whatsapp,
   };
 }
 
@@ -940,5 +941,154 @@ describe('OrdersService repeat claims', () => {
       service.claimCheck(String(CAMP), '9876543210', 'tok'),
     ).resolves.toEqual({ alreadyClaimed: true, count: 1 });
     expect(otp.checkProof).toHaveBeenLastCalledWith('tok', '9876543210');
+  });
+});
+
+describe('OrdersService — claim confirmation WhatsApp', () => {
+  const P1 = new Types.ObjectId().toString();
+  const CAMPAIGN_ID = new Types.ObjectId().toString();
+  // The notification runs after create/attach return; let it finish.
+  const flush = () => new Promise((r) => setImmediate(r));
+  const publicAddress = {
+    ...storeOrder.shippingAddress,
+    fullName: 'ravi KUMAR',
+    landmark: 'Near park',
+    sectorVillage: 'Sector 5',
+  };
+
+  function claimSetup(campaign: any = {}) {
+    const ctx = setup();
+    ctx.whatsapp.canSend = true;
+    ctx.whatsapp.sendTemplateByIdTo.mockResolvedValue({});
+    ctx.products.findOne.mockResolvedValue({
+      _id: P1,
+      coachId: TRIBE_ID,
+      baseProductionCost: 100,
+      retailPrice: 300,
+    });
+    ctx.campaignModel.findById.mockReturnValue(
+      query({
+        _id: CAMPAIGN_ID,
+        coachId: TRIBE_ID,
+        status: 'ACTIVE',
+        type: OrderType.WELCOME_KIT,
+        products: [{ productId: P1, quantity: 1 }],
+        ...campaign,
+      }),
+    );
+    ctx.orderModel.save.mockImplementation(function (this: any) {
+      return Promise.resolve(this);
+    });
+    // What notifyClaimReceived reads back (populated).
+    ctx.orderModel.findById.mockReturnValue(
+      query({
+        shippingAddress: { fullName: 'ravi KUMAR', phone: '9876543210' },
+        coachId: { brand: 'RV Life Coaching' },
+        campaignId: { name: 'Diamond Kit' },
+        items: [],
+      }),
+    );
+    return ctx;
+  }
+  const claim = (extra: any = {}) => ({
+    campaignId: CAMPAIGN_ID,
+    otpToken: 'proof',
+    shippingAddress: publicAddress,
+    items: [{ productId: P1, quantity: 1 }],
+    ...extra,
+  });
+
+  it("sends the template to the customer's number when they claim with an address", async () => {
+    const { service, whatsapp } = claimSetup();
+    await service.create(claim());
+    await flush();
+    expect(whatsapp.sendTemplateByIdTo).toHaveBeenCalledTimes(1);
+    expect(whatsapp.sendTemplateByIdTo).toHaveBeenCalledWith(
+      '9876543210',
+      '1066935259306839',
+      {
+        customer_name: 'Ravi Kumar',
+        kit_name: 'Diamond Kit',
+        client_brand: 'RV Life Coaching',
+      },
+    );
+  });
+
+  it('a failed send never fails the claim', async () => {
+    const { service, whatsapp } = claimSetup();
+    whatsapp.sendTemplateByIdTo.mockRejectedValue(new Error('Meta down'));
+    await expect(service.create(claim())).resolves.toBeTruthy();
+    await flush();
+  });
+
+  it('does not send for staff-placed orders, store purchases, or when WhatsApp is off', async () => {
+    let ctx = claimSetup();
+    await ctx.service.create(claim(), { trusted: true });
+    await flush();
+    expect(ctx.whatsapp.sendTemplateByIdTo).not.toHaveBeenCalled();
+
+    ctx = claimSetup();
+    await ctx.service.create({ ...storeOrder, items: [item()] });
+    await flush();
+    expect(ctx.whatsapp.sendTemplateByIdTo).not.toHaveBeenCalled();
+
+    ctx = claimSetup();
+    ctx.whatsapp.canSend = false;
+    await ctx.service.create(claim());
+    await flush();
+    expect(ctx.whatsapp.sendTemplateByIdTo).not.toHaveBeenCalled();
+  });
+
+  it('waits for the address on address-later campaigns, then sends once', async () => {
+    const { service, whatsapp, orderModel } = claimSetup({
+      formType: 'WITHOUT_ADDRESS',
+    });
+    await service.create(claim());
+    await flush();
+    expect(whatsapp.sendTemplateByIdTo).not.toHaveBeenCalled();
+
+    const pending = () => {
+      const d: any = {
+        _id: new Types.ObjectId(),
+        shippingAddress: { fullName: 'Ravi', phone: '9876543210' },
+        addressPending: true,
+        markModified: jest.fn(),
+      };
+      d.save = jest.fn().mockResolvedValue(d);
+      return d;
+    };
+    orderModel.find.mockReturnValue(query([pending(), pending()]));
+    await service.attachAddressByPhone(
+      CAMPAIGN_ID,
+      '9876543210',
+      publicAddress,
+      {
+        otpToken: 'proof',
+      },
+    );
+    await flush();
+    expect(whatsapp.sendTemplateByIdTo).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not send when staff bulk-upload the address', async () => {
+    const { service, whatsapp, orderModel } = claimSetup();
+    const d: any = {
+      _id: new Types.ObjectId(),
+      shippingAddress: { fullName: 'Ravi', phone: '9876543210' },
+      addressPending: true,
+      markModified: jest.fn(),
+    };
+    d.save = jest.fn().mockResolvedValue(d);
+    orderModel.find.mockReturnValue(query([d]));
+    await service.attachAddressByPhone(
+      CAMPAIGN_ID,
+      '9876543210',
+      publicAddress,
+      {
+        trusted: true,
+      },
+    );
+    await flush();
+    expect(whatsapp.sendTemplateByIdTo).not.toHaveBeenCalled();
   });
 });

@@ -56,6 +56,12 @@ CORS is restricted to the frontend origins in `CORS_ORIGINS`. Also live in `main
 - `WHATSAPP_OTP_TEMPLATE_ID` — Meta **template id** for the authentication template
   that delivers verification codes (defaults to `1521285713364906`). Resolved to a
   name/language once at runtime and cached, since the send API takes a name
+- `WHATSAPP_CLAIM_TEMPLATE_ID` — claim confirmation sent to the customer (defaults to
+  `1066935259306839`, `order_confirmation_message_to_customer`: `customer_name`, `kit_name`
+  = campaign name, `client_brand`). Sent by `OrdersService.notifyClaimReceived`, fire-and-forget,
+  only for the customer's own submissions: a public kit claim with its address, or — on
+  address-later campaigns — once per address-page submission. Never for trusted (staff/CSV)
+  orders, bulk address uploads, or store purchases.
 - `WHATSAPP_DIGEST_TEST_NUMBER` / `WHATSAPP_DIGEST_ENABLED` / `WHATSAPP_DIGEST_TEMPLATE_ID`
   — the nightly dispatch digest (below). Sending is **off unless one is set**
 - `INDIAPOST_BASE_URL` — India Post external-integration host. Defaults to UAT

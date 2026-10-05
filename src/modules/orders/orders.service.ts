@@ -70,6 +70,9 @@ const MEDIA_MAX_BYTES = 25 * 1024 * 1024;
 const DISPATCH_TEMPLATE_ID = '1057815553754091';
 const DELIVERED_TEMPLATE_ID = '1419053503494614';
 const RETURNED_TEMPLATE_ID = '1590261155917388';
+// Sent once a customer's kit claim is in with its address ("we've received your
+// address details for your <kit> from <brand>"). Named params, no header.
+const CLAIM_RECEIVED_TEMPLATE_ID = '1066935259306839';
 
 // The dispatch and delivered templates were approved with an IMAGE header, so
 // those sends need one and Meta fetches it from a public URL at send time. The
@@ -405,6 +408,13 @@ export class OrdersService {
     }
 
     await this.recordMember(savedOrder);
+
+    // The customer's own claim, with its address: confirm it on WhatsApp. Not for
+    // staff-placed orders (CSV tool) or address-later claims — those confirm when
+    // the customer fills the address in (attachAddressByPhone).
+    if (isWelcomeKit && campaign && !opts.trusted && !addressPending) {
+      void this.notifyClaimReceived(String(savedOrder._id));
+    }
     return savedOrder;
   }
 
@@ -629,6 +639,9 @@ export class OrdersService {
       await order.save();
       await this.recordMember(order);
     }
+    // One confirmation per submission, even when it completes several claims
+    // (same campaign + phone = same kit). Bulk uploads by staff don't message.
+    if (!opts.trusted) void this.notifyClaimReceived(String(orders[0]._id));
     return { updated: orders.length };
   }
 
@@ -1542,6 +1555,47 @@ export class OrdersService {
     } catch (err) {
       this.logger.error(
         `Could not send the ${status} WhatsApp update for order ${orderId}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Confirms a kit claim to the customer over WhatsApp once its address is in.
+   * Never throws and isn't awaited by callers: the claim has already been saved,
+   * and a messaging failure must not look like a failed claim.
+   */
+  private async notifyClaimReceived(orderId: string): Promise<void> {
+    if (!this.whatsapp.canSend) {
+      this.logger.warn(
+        `WhatsApp is not configured — skipping the claim confirmation for ${orderId}`,
+      );
+      return;
+    }
+    try {
+      const order: any = await this.orderModel
+        .findById(orderId)
+        .populate('coachId')
+        .populate('campaignId', 'name')
+        .populate('items.productId', 'name')
+        .exec();
+      const phone = order?.shippingAddress?.phone;
+      if (!phone) return;
+      const coach = order.coachId || {};
+      await this.whatsapp.sendTemplateByIdTo(
+        phone,
+        process.env.WHATSAPP_CLAIM_TEMPLATE_ID?.trim() || CLAIM_RECEIVED_TEMPLATE_ID,
+        {
+          // Same values and fallbacks as the dispatch/delivered updates.
+          customer_name: titleCaseName(order.shippingAddress?.fullName) || 'there',
+          kit_name:
+            order.campaignId?.name || order.items?.[0]?.productId?.name || 'kit',
+          client_brand: coach.brand || coach.name || 'Tribe Merchandise',
+        },
+      );
+      this.logger.log(`Sent the claim confirmation WhatsApp for order ${orderId}`);
+    } catch (err) {
+      this.logger.error(
+        `Could not send the claim confirmation WhatsApp for order ${orderId}: ${(err as Error).message}`,
       );
     }
   }
