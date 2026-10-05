@@ -194,8 +194,11 @@ export class OrdersController {
   @Get('deleted')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
-  findDeleted(@Query('coachId') coachId?: string) {
-    return this.ordersService.findDeleted(coachId);
+  findDeleted(
+    @Query('coachId') coachId?: string,
+    @Query('campaignId') campaignId?: string,
+  ) {
+    return this.ordersService.findDeleted(coachId, campaignId);
   }
 
   // Admin: log a parcel that came back, by the tracking number on the label.
@@ -212,12 +215,14 @@ export class OrdersController {
   @Roles(UserRole.ADMIN)
   findReturned(
     @Query('coachId') coachId?: string,
+    @Query('campaignId') campaignId?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('search') search?: string,
   ) {
     return this.ordersService.findReturned({
       coachId,
+      campaignId,
       page: Number(page) || 1,
       limit: Number(limit) || 20,
       search,
@@ -238,12 +243,14 @@ export class OrdersController {
   @Roles(UserRole.ADMIN)
   findRejected(
     @Query('coachId') coachId?: string,
+    @Query('campaignId') campaignId?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('search') search?: string,
   ) {
     return this.ordersService.findRejected({
       coachId,
+      campaignId,
       page: Number(page) || 1,
       limit: Number(limit) || 20,
       search,
@@ -282,6 +289,7 @@ export class OrdersController {
     @Query('search') search?: string,
     @Query('status') status?: string,
     @Query('coachId') coachId?: string | string[],
+    @Query('campaignId') campaignId?: string | string[],
   ) {
     return this.ordersService.withPriorClaimsPage(
       await this.ordersService.findAllPaginated({
@@ -290,6 +298,7 @@ export class OrdersController {
         search,
         status,
         coachId,
+        campaignId,
       }),
     );
   }
@@ -310,6 +319,7 @@ export class OrdersController {
     @Query('limit') limit?: string,
     @Query('search') search?: string,
     @Query('status') status?: string,
+    @Query('campaignId') campaignId?: string | string[],
   ) {
     return this.ordersService.withPriorClaimsPage(
       await this.ordersService.findByCoachPaginated(coachId, {
@@ -317,6 +327,7 @@ export class OrdersController {
         limit: limit ? Number(limit) : undefined,
         search,
         status,
+        campaignId,
       }),
     );
   }

@@ -543,6 +543,8 @@ fields, messages fixed — change both sides together). No permission switch.
   `POST /`, `PATCH /:id`, `DELETE /:id` (admin only; validated DTOs,
   `kitPrice?: number | null`)
 - **orders**: `GET /me` & `GET /coach` (coach), `GET /pending-approvals` (admin/coach),
+  admin lists `GET /paginated`, `/by-coach/:coachId`, `/returned`, `/rejected`, `/deleted` take
+  `campaignId` (comma list; `none` = no campaign) via `andCampaignFilter` in `common/utils/coach-ids.util.ts`,
   `POST /deliver-by-tracking/preview` + `POST /deliver-by-tracking` (admin; `{ codes }`, up to 1000
   unique, case/space-insensitive; one row per code: READY (New / Ready to Ship / Dispatched) /
   ALREADY_DELIVERED / CLOSED (returned, cancelled) / AWAITING_APPROVAL / MULTIPLE / NOT_FOUND, then

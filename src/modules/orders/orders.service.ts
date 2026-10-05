@@ -25,7 +25,7 @@ import { MAX_TRACKING_CODES, uniqueCodes } from './tracking-codes';
 import { titleCaseName } from '../../common/utils/name.util';
 import { isAllowedMediaUrl } from '../../common/utils/media-url';
 import { pageSizeOf } from '../../common/utils/pagination.util';
-import { coachIdsFilter } from '../../common/utils/coach-ids.util';
+import { andCampaignFilter, coachIdsFilter } from '../../common/utils/coach-ids.util';
 import { MAX_MEDIA_ORDERS } from './dto/download-media.dto';
 import { TribeMembersService } from '../tribe-members/tribe-members.service';
 import { TribesService } from '../tribes/tribes.service';
@@ -799,6 +799,7 @@ export class OrdersService {
   async findRejected(
     options: {
       coachId?: string;
+      campaignId?: string;
       page?: number;
       limit?: number;
       search?: string;
@@ -820,6 +821,7 @@ export class OrdersService {
     };
     const coaches = coachIdsFilter(options.coachId);
     if (coaches) filter.coachId = coaches;
+    andCampaignFilter(filter, options.campaignId);
 
     const search = options.search?.trim();
     if (search) {
@@ -911,7 +913,13 @@ export class OrdersService {
 
   /** Admin: returned parcels, paginated and searchable (tracking number included). */
   async findReturned(
-    options: { coachId?: string; page?: number; limit?: number; search?: string } = {},
+    options: {
+      coachId?: string;
+      campaignId?: string;
+      page?: number;
+      limit?: number;
+      search?: string;
+    } = {},
   ): Promise<{
     data: Order[];
     total: number;
@@ -929,6 +937,7 @@ export class OrdersService {
     };
     const coaches = coachIdsFilter(options.coachId);
     if (coaches) filter.coachId = coaches;
+    andCampaignFilter(filter, options.campaignId);
 
     const search = options.search?.trim();
     if (search) {
@@ -1031,10 +1040,14 @@ export class OrdersService {
   }
 
   // Admin: list soft-deleted orders (optionally scoped to a tribe).
-  async findDeleted(coachId?: string | string[]): Promise<Order[]> {
+  async findDeleted(
+    coachId?: string | string[],
+    campaignId?: string | string[],
+  ): Promise<Order[]> {
     const filter: any = { isDeleted: true };
     const coaches = coachIdsFilter(coachId);
     if (coaches) filter.coachId = coaches;
+    andCampaignFilter(filter, campaignId);
     return this.orderModel
       .find(filter)
       .sort({ deletedAt: -1 })
@@ -1239,7 +1252,13 @@ export class OrdersService {
 
   async findByCoachPaginated(
     coachId: string,
-    options: { page?: number; limit?: number; search?: string; status?: string } = {},
+    options: {
+      page?: number;
+      limit?: number;
+      search?: string;
+      status?: string;
+      campaignId?: string | string[];
+    } = {},
   ): Promise<{
     data: Order[];
     total: number;
@@ -1252,6 +1271,7 @@ export class OrdersService {
     const skip = (page - 1) * limit;
 
     const filter: any = { ...NOT_REJECTED, coachId, isDeleted: { $ne: true } };
+    andCampaignFilter(filter, options.campaignId);
 
     if (options.status) {
       filter.status = options.status;
@@ -1313,6 +1333,7 @@ export class OrdersService {
       search?: string;
       status?: string;
       coachId?: string | string[];
+      campaignId?: string | string[];
     } = {},
   ): Promise<{
     data: Order[];
@@ -1328,6 +1349,7 @@ export class OrdersService {
     const filter: any = { ...NOT_REJECTED, isDeleted: { $ne: true } };
     const coaches = coachIdsFilter(options.coachId);
     if (coaches) filter.coachId = coaches;
+    andCampaignFilter(filter, options.campaignId);
     if (options.status) {
       filter.status = options.status;
       // "New" excludes welcome-kit orders still awaiting approval — those live in
