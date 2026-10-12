@@ -115,6 +115,7 @@ jobs:
             INDIAPOST_BASE_URL=${{ secrets.INDIAPOST_BASE_URL }}
             INDIAPOST_USERNAME=${{ secrets.INDIAPOST_USERNAME }}
             INDIAPOST_PASSWORD=${{ secrets.INDIAPOST_PASSWORD }}
+            INDIAPOST_WEBHOOK_TOKEN=${{ secrets.INDIAPOST_WEBHOOK_TOKEN }}
             EOF
             chmod 600 .env
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin

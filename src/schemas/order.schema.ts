@@ -160,6 +160,25 @@ export class Order extends Document {
   @Prop()
   deliveredAt?: Date;
 
+  // Latest scan India Post pushed to our webhook (see PostalEvent), for lists
+  // and the order dialog. Only moves forward in time.
+  @Prop({
+    type: {
+      code: String,
+      description: String,
+      at: Date,
+      office: String,
+      _id: false,
+    },
+    default: undefined,
+  })
+  lastPostalEvent?: { code: string; description: string; at: Date; office: string };
+
+  // When India Post reported the article returned. Flag for the admin only —
+  // logging the return (stock, re-send) stays a manual step.
+  @Prop()
+  postalReturnReportedAt?: Date;
+
   // Audit trail of every status transition, newest appended last.
   @Prop({
     type: [{

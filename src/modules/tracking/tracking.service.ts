@@ -3,6 +3,8 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Order } from '../../schemas/order.schema';
 import { Tribe } from '../../schemas/tribe.schema';
+import { PostalEvent } from '../../schemas/postal-event.schema';
+import { milestoneOf } from '../postal-webhook/postal-event-rules';
 import { UserRole } from '../../schemas/user.schema';
 import {
   IndiaPostApiService,
@@ -79,6 +81,8 @@ export class TrackingService {
     private readonly indiaPost: IndiaPostApiService,
     @InjectModel(Order.name) private readonly orderModel: Model<Order>,
     @InjectModel(Tribe.name) private readonly tribeModel: Model<Tribe>,
+    @InjectModel(PostalEvent.name)
+    private readonly postalEventModel: Model<PostalEvent>,
   ) {}
 
   async track(consignmentNumber: string): Promise<TrackingResult> {
@@ -165,7 +169,24 @@ export class TrackingService {
     const numbers = consignmentNumbers.map((n) => this.normalize(n));
     if (!numbers.length) return [];
 
-    const articles = await this.indiaPost.trackBulk(numbers);
+    // Scans India Post pushed to our webhook. They stand in when the tracking
+    // API refuses us (not enabled for our account) or doesn't know an article.
+    const pushed = await this.pushedEvents(numbers);
+
+    let articles: IndiaPostArticle[];
+    try {
+      articles = await this.indiaPost.trackBulk(numbers);
+    } catch (err) {
+      if (!pushed.size) throw err;
+      this.logger.warn(
+        `India Post tracking API failed (${(err as Error).message}); answering from webhook events`,
+      );
+      return numbers.map((n) =>
+        pushed.has(n)
+          ? this.fromWebhook(n, pushed.get(n)!)
+          : this.map(n, undefined),
+      );
+    }
 
     // Index the response by article number. Every number asked for comes back,
     // including ones India Post has no data for, so `map` decides what counts
@@ -178,7 +199,79 @@ export class TrackingService {
       if (key) byNumber.set(key, article);
     }
 
-    return numbers.map((number) => this.map(number, byNumber.get(number)));
+    return numbers.map((number) => {
+      const result = this.map(number, byNumber.get(number));
+      return !result.found && pushed.has(number)
+        ? this.fromWebhook(number, pushed.get(number)!)
+        : result;
+    });
+  }
+
+  private async pushedEvents(numbers: string[]): Promise<Map<string, any[]>> {
+    const rows = await this.postalEventModel
+      .find({ articleNumber: { $in: numbers } } as any)
+      .sort({ eventAt: 1 })
+      .lean()
+      .exec();
+    const out = new Map<string, any[]>();
+    for (const r of rows as any[]) {
+      out.set(r.articleNumber, [...(out.get(r.articleNumber) ?? []), r]);
+    }
+    return out;
+  }
+
+  /** A TrackingResult built from webhook-pushed scans (oldest first). */
+  private fromWebhook(number: string, rows: any[]): TrackingResult {
+    const events: TrackingEvent[] = rows.map((r) => {
+      const event = r.description || r.eventCode || 'Scan';
+      return {
+        timestamp: new Date(r.eventAt).toISOString(),
+        event,
+        eventType: this.eventType(event),
+        office: r.office || '',
+        pincode: String(r.officeId ?? ''),
+        remarks: r.nonDeliveryReason || '',
+        rts: milestoneOf(r.eventCode, r.description) === 'RETURNED',
+      };
+    });
+    const last = events[events.length - 1];
+    const booked = rows.find(
+      (r) => milestoneOf(r.eventCode, r.description) === 'BOOKED',
+    );
+    const deliveredRow = [...rows]
+      .reverse()
+      .find((r) => milestoneOf(r.eventCode, r.description) === 'DELIVERED');
+    const raw =
+      (rows.find((r) => r.raw?.booking_office_name) ?? rows[0])?.raw ?? {};
+    return {
+      consignmentNumber: number,
+      available: true,
+      found: true,
+      partial: false,
+      currentStatus: last?.event || 'Booked',
+      currentStatusType: last?.eventType || 'Booked',
+      delivered: Boolean(deliveredRow),
+      bookedAt: booked
+        ? new Date(booked.eventAt).toISOString()
+        : events[0]?.timestamp || null,
+      deliveredAt: deliveredRow
+        ? new Date(deliveredRow.eventAt).toISOString()
+        : null,
+      lastUpdatedAt: last?.timestamp || null,
+      events,
+      articleType: this.str(raw.article_type as string),
+      bookedAtOffice: this.str(raw.booking_office_name as string),
+      originPincode: this.str(raw.booking_pin as number),
+      destinationPincode: this.str(raw.destination_pincode as number),
+      deliveryLocation: this.str(raw.destination_office_name as string),
+      tariff:
+        typeof raw.tariff === 'number' && raw.tariff > 0
+          ? (raw.tariff as number)
+          : undefined,
+      returnToSender: events.some((e) => e.rts),
+      source: 'India Post (webhook)',
+      fetchedAt: new Date().toISOString(),
+    };
   }
 
   private normalize(consignmentNumber: string): string {

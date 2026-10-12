@@ -159,6 +159,31 @@ Operational notes:
    book by handing over a CSV rather than through their Booking API, so check this first once
    tracking is enabled: if real parcels come back empty, it's the booking channel, not the code.
 
+### India Post webhook (`postal-webhook/`)
+
+India Post pushes every scan of our articles to us (their §13.8; configured in their Customer
+Self-Service Portal → Data Transfer Mode: **Webhook**, all domestic booking events ticked):
+- Booking events → `POST /api/indiapost/webhook/<INDIAPOST_WEBHOOK_TOKEN>/booking`
+- Other events   → `POST /api/indiapost/webhook/<INDIAPOST_WEBHOOK_TOKEN>/events`
+
+The token is a GitHub secret (unset or < 16 chars = webhook off, every call 404s). Unthrottled,
+and always 200 for a valid token — even for events we can't use — so India Post doesn't retry.
+Body: one object (their sample), an array, or `{ events | data: [...] }`; entries without a valid
+article number (e.g. the portal's Test ping) are ignored. Pure parsing / classification in
+`postal-event-rules.ts` (tested): `event_date` + `event_time` are IST; Item Booked / Delivered /
+Returned are matched on code **and** description (only ITEM_BOOK is documented), and "not
+delivered" / non-delivery / attempted / out-for-delivery never count as delivered.
+
+`PostalWebhookService` stores each scan in **`postalevents`** (unique per article + code + time +
+office; repeats are skipped) and, for the **one** non-deleted order with that tracking number:
+keeps `order.lastPostalEvent` (forward-only); **Item Booked** moves New / Ready to Ship →
+Dispatched; **Item Delivered** moves New / Ready to Ship / Dispatched → Delivered
+(`updateStatus(..., { skipDispatch: true })`, so the usual WhatsApp updates go out); **Item
+Returned** only sets `postalReturnReportedAt` — logging the return stays manual. Pending-approval,
+delivered, returned and cancelled orders are never moved; a number on several orders is recorded
+but touches none. `TrackingService` answers from these events when the tracking API refuses us
+or doesn't know an article (`source: 'India Post (webhook)'`).
+
 ## Data model (`src/schemas/`)
 
 - **User** — `email`, `password` (bcrypt), `name`, `role` (`ADMIN | COACH | CUSTOMER`), `phoneNumber`.

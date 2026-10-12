@@ -44,6 +44,8 @@ services:
       INDIAPOST_BASE_URL: ${INDIAPOST_BASE_URL:-https://app.indiapost.gov.in/beextcustomer}
       INDIAPOST_USERNAME: ${INDIAPOST_USERNAME:-}
       INDIAPOST_PASSWORD: ${INDIAPOST_PASSWORD:-}
+      # Secret path segment of our India Post webhook URLs (unset = webhook off).
+      INDIAPOST_WEBHOOK_TOKEN: ${INDIAPOST_WEBHOOK_TOKEN:-}
       # Keep Node heap under the container mem_limit to avoid OOM on the 1GB box.
       NODE_OPTIONS: "--max-old-space-size=320"
     mem_limit: 400m

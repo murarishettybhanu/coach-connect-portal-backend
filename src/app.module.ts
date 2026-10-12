@@ -14,6 +14,7 @@ import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { TransactionsModule } from './modules/transactions/transactions.module';
 import { TrackingModule } from './modules/tracking/tracking.module';
+import { PostalWebhookModule } from './modules/postal-webhook/postal-webhook.module';
 import { UploadsModule } from './modules/uploads/uploads.module';
 import { CatalogModule } from './modules/catalog/catalog.module';
 import { TribeKitsModule } from './modules/tribe-kits/tribe-kits.module';
@@ -48,6 +49,7 @@ import { AnalyticsModule } from './modules/analytics/analytics.module';
     OrdersModule,
     TransactionsModule,
     TrackingModule,
+    PostalWebhookModule,
     UploadsModule,
     CatalogModule,
     TribeKitsModule,
