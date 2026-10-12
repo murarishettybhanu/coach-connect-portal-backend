@@ -142,31 +142,22 @@ the document's samples.** Verified against UAT from the production host:
 
 Operational notes:
 
-1. **⚠️ Tracking returns nothing for real parcels right now, and that is expected.**
-   Production points at **UAT**, and UAT carries its own synthetic dataset that is
-   **disjoint from live India Post data**. Measured 2026-09-27 across 30 real
-   dispatched/delivered orders: India Post knew **0 of 30**. The two directions
-   both fail, which is what proves it:
-
-   | Article | UAT API | Public tracking |
-   |---|---|---|
-   | `CA187141418IN` (a real parcel of ours) | no data | 19 events, delivered |
-   | `EY011867595IN` (a UAT sample) | 6 events | no data |
-
-   So this is **not** customer-id scoping and **not** a mapping bug — the fix is
-   production credentials, nothing else. Don't re-debug the code over it.
-   **Decision (2026-09-27):** leave the feature dark until India Post completes
-   onboarding (§2 of their document, `integrations.cept@indiapost.gov.in`); a
-   scrape fallback was considered and declined. Switching over is
-   `INDIAPOST_BASE_URL` + real credentials, no code change.
-2. Their document also says only articles **booked under our own customer id** are
-   reported. Untested — the UAT dataset gap masks it. It may bite once production
-   credentials land, because we book by handing over a CSV rather than through
-   their Booking API. That is the next thing to check, not the first.
-3. India Post **filters callers by IP**: the UAT host resets the TLS handshake
-   from unapproved networks, so it cannot be smoke-tested from a dev machine. The
-   EC2 reaches it fine, so verify from there (`docker compose exec backend node -e …`).
-   Tokens come back with `expires_in: 900`, matching the cache's assumption.
+1. **Production (since 2026-10-13).** Base URL `https://app.indiapost.gov.in/beextcustomer`
+   (the code/compose default), username = our India Post customer id `1815052445`, password =
+   its Customer Self-Service Portal password (India Post's default is `Dop@1234`). Set via the
+   `INDIAPOST_*` GitHub secrets. Production tokens report `expires_in: 1800`; the cache uses
+   whatever `expires_in` says. The UAT host (`https://test.cept.gov.in/beextcustomer`) only
+   carries synthetic articles disjoint from live data (measured 2026-09-27: 0 of 30 real parcels).
+2. **⚠️ Tracking returns 403 "You are not authorized to access this API" until India Post
+   enables it for our customer id.** Verified 2026-10-13: login succeeds and the pincode-search
+   API answers with the same token (so it's not the credentials or a blocked host), but
+   `/v1/tracking/bulk` refuses every article, including India Post's own samples. The tool then
+   shows "India Post hasn't enabled this API for our account yet". Their document says the API is
+   token + **IP whitelisting**, so the request to `integrations.cept@indiapost.gov.in` should name
+   the API (bulk tracking) and the EC2's IP `3.111.112.232`. No code change is needed once granted.
+3. Their document also says only articles **booked under our own customer id** are reported. We
+   book by handing over a CSV rather than through their Booking API, so check this first once
+   tracking is enabled: if real parcels come back empty, it's the booking channel, not the code.
 
 ## Data model (`src/schemas/`)
 

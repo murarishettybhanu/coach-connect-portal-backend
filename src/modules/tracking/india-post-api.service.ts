@@ -78,10 +78,11 @@ export const MAX_ARTICLES_PER_CALL = 500;
  * `TrackingService` maps the responses onto our own shapes.
  *
  * Config (`.env`):
- *  - `INDIAPOST_BASE_URL` — defaults to the UAT host
- *    (`https://test.cept.gov.in/beextcustomer`). Point it at the production
- *    host once India Post issues production credentials.
- *  - `INDIAPOST_USERNAME` / `INDIAPOST_PASSWORD` — login for /v1/access/login.
+ *  - `INDIAPOST_BASE_URL` — defaults to the production host
+ *    (`https://app.indiapost.gov.in/beextcustomer`); the UAT host
+ *    (`https://test.cept.gov.in/beextcustomer`) only carries synthetic articles.
+ *  - `INDIAPOST_USERNAME` / `INDIAPOST_PASSWORD` — login for /v1/access/login:
+ *    our India Post customer id and its Customer Self-Service Portal password.
  *
  * Two things to know before expecting live data:
  *  1. India Post only returns articles **booked under the same customer id** as
@@ -101,7 +102,7 @@ export class IndiaPostApiService {
 
   private get baseUrl(): string {
     return (
-      process.env.INDIAPOST_BASE_URL || 'https://test.cept.gov.in/beextcustomer'
+      process.env.INDIAPOST_BASE_URL || 'https://app.indiapost.gov.in/beextcustomer'
     ).replace(/\/+$/, '');
   }
 
@@ -268,14 +269,21 @@ export class IndiaPostApiService {
     }
 
     if (!res.ok) {
+      // Errors come as `{ message }` or (production) `{ error: { message } }`.
+      const body = parsed as { message?: string; error?: { message?: string } };
       const detail =
-        (parsed as { message?: string }).message ||
-        text.slice(0, 300) ||
-        `HTTP ${res.status}`;
+        body.error?.message || body.message || text.slice(0, 300) || `HTTP ${res.status}`;
       this.logger.error(`India Post ${path} → ${res.status}: ${detail}`);
       // Numbers are validated before they get here, so any upstream rejection
       // is India Post's side or our credentials — never the caller's request.
-      throw res.status === 401 || res.status === 403
+      if (res.status === 403) {
+        // Logged in fine, but this API isn't enabled for our customer id (or
+        // our server's IP isn't whitelisted for it) — India Post has to grant it.
+        throw new ServiceUnavailableException(
+          "India Post hasn't enabled this API for our account yet — tracking is unavailable",
+        );
+      }
+      throw res.status === 401
         ? new ServiceUnavailableException(
             'India Post rejected our credentials — tracking is unavailable',
           )
