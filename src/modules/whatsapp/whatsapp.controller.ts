@@ -16,13 +16,27 @@ import {
   StreamableFile,
   UseGuards,
 } from '@nestjs/common';
+import {
+  Injectable,
+  PayloadTooLargeException,
+  UploadedFile,
+  UseInterceptors,
+  type CallHandler,
+  type ExecutionContext,
+  type NestInterceptor,
+} from '@nestjs/common';
+import { catchError, throwError, type Observable } from 'rxjs';
 import type { RawBodyRequest } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { Throttle } from '@nestjs/throttler';
+import { MAX_OUTBOUND_MEDIA_BYTES } from './outbound-media';
 import type { Request, Response } from 'express';
 import { SkipThrottle } from '@nestjs/throttler';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { WhatsappService } from './whatsapp.service';
 import { WhatsappApiService } from './whatsapp-api.service';
 import { WhatsappInboxService } from './whatsapp-inbox.service';
+import { QuickMessagesService } from './quick-messages.service';
 import { SendReplyDto } from './dto/send-reply.dto';
 import { CreateTemplateDto } from './dto/create-template.dto';
 import { SendTemplateDto } from './dto/send-template.dto';
@@ -46,6 +60,26 @@ const INLINE_MEDIA_TYPES =
  * Deliberately unguarded — Meta sends no auth header. Authenticity comes from
  * the `X-Hub-Signature-256` HMAC, checked on every POST.
  */
+/** Multer's 413 "File too large" → a 400 that says the limit. */
+@Injectable()
+export class MediaTooLargeInterceptor implements NestInterceptor {
+  intercept(_ctx: ExecutionContext, next: CallHandler): Observable<unknown> {
+    return next
+      .handle()
+      .pipe(
+        catchError((err) =>
+          throwError(() =>
+            err instanceof PayloadTooLargeException
+              ? new BadRequestException(
+                  `Files must be ${MAX_OUTBOUND_MEDIA_BYTES / (1024 * 1024)} MB or smaller to send on WhatsApp`,
+                )
+              : err,
+          ),
+        ),
+      );
+  }
+}
+
 @ApiExcludeController()
 @Controller('whatsapp')
 export class WhatsappController {
@@ -89,9 +123,18 @@ export class WhatsappAdminController {
     private readonly whatsappService: WhatsappService,
     private readonly api: WhatsappApiService,
     private readonly inbox: WhatsappInboxService,
+    private readonly quick: QuickMessagesService,
   ) {}
 
   // GET /api/whatsapp/conversations — inbox list, most recently active first.
+  // GET /api/whatsapp/unread — { chats, messages } with unread messages, for
+  // the admin sidebar badge (polled; one small aggregation).
+  @Get('unread')
+  @Roles(UserRole.ADMIN)
+  unread() {
+    return this.whatsappService.unreadSummary();
+  }
+
   @Get('conversations')
   @Roles(UserRole.ADMIN)
   listConversations() {
@@ -133,6 +176,50 @@ export class WhatsappAdminController {
   @Roles(UserRole.ADMIN)
   reply(@Param('contact') contact: string, @Body() dto: SendReplyDto) {
     return this.whatsappService.replyTo(contact, dto.text);
+  }
+
+  // GET /api/whatsapp/conversations/:contact/quick-messages?tribeId= — the
+  // quick-message picker for this chat, rendered with its tribe / order.
+  @Get('conversations/:contact/quick-messages')
+  @Roles(UserRole.ADMIN)
+  quickMessages(
+    @Param('contact') contact: string,
+    @Query('tribeId') tribeId?: string,
+  ) {
+    return this.quick.list(contact, tribeId);
+  }
+
+  // POST /api/whatsapp/conversations/:contact/quick-messages/:id { tribeId? } —
+  // send one (24-hour window only).
+  @Post('conversations/:contact/quick-messages/:id')
+  @Roles(UserRole.ADMIN)
+  sendQuickMessage(
+    @Param('contact') contact: string,
+    @Param('id') id: string,
+    @Body('tribeId') tribeId?: string,
+  ) {
+    return this.quick.send(contact, id, tribeId);
+  }
+
+  // POST /api/whatsapp/conversations/:contact/media — multipart `file` (+ optional
+  // `caption`): send an image, video, audio file or document. Same 24-hour rule.
+  @Post('conversations/:contact/media')
+  @Roles(UserRole.ADMIN)
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @UseInterceptors(
+    MediaTooLargeInterceptor,
+    FileInterceptor('file', {
+      // One file, held in memory only until it's handed to WhatsApp.
+      limits: { fileSize: MAX_OUTBOUND_MEDIA_BYTES, files: 1, fields: 5 },
+    }),
+  )
+  async sendMedia(
+    @Param('contact') contact: string,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body('caption') caption?: string,
+  ) {
+    if (!file) throw new BadRequestException('Attach a file to send');
+    return this.whatsappService.replyWithMedia(contact, file, caption);
   }
 
   // POST /api/whatsapp/conversations/:contact/template — approved template,

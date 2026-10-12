@@ -24,6 +24,8 @@ import {
   type SendTemplateInput,
   type WhatsappTemplate,
 } from './whatsapp-api.service';
+import { checkOutboundMedia, mediaPreview, MAX_CAPTION } from './outbound-media';
+import { previewText, toInteractive, type QuickPayload } from './quick-messages';
 
 // Shape of the pieces of Meta's webhook payload we read. Everything is
 // optional because Meta adds fields (and whole `field` types) over time and a
@@ -419,6 +421,158 @@ export class WhatsappService {
       );
     }
     return this.sendText(contact, body);
+  }
+
+  /**
+   * Sends a quick message (see quick-messages.ts) — plain text or interactive —
+   * inside the 24-hour window, recorded in the thread as its readable preview.
+   */
+  async sendQuick(
+    contact: string,
+    quickId: string,
+    payload: QuickPayload,
+  ): Promise<WhatsappMessage> {
+    const conversation = await this.conversationModel.findOne({ contact });
+    if (!conversation) {
+      throw new NotFoundException('No WhatsApp conversation with that number');
+    }
+    if (!this.isWindowOpen(conversation.lastInboundAt)) {
+      throw new BadRequestException(
+        'The 24-hour reply window has closed for this customer. ' +
+          'Only an approved template message can be sent now.',
+      );
+    }
+    const interactive = toInteractive(payload);
+    const text = previewText(payload);
+    const now = new Date();
+    const base = {
+      direction: WhatsappDirection.OUTBOUND,
+      contact,
+      from: process.env.WHATSAPP_PHONE_NUMBER_ID ?? 'business',
+      to: contact,
+      type: interactive ? 'interactive' : 'text',
+      text,
+      raw: { quickMessageId: quickId, ...(interactive ? { interactive } : {}) },
+      sentAt: now,
+      automated: false,
+      handled: true,
+    };
+    try {
+      const { waMessageId } = interactive
+        ? await this.api.sendInteractive(contact, interactive)
+        : await this.api.sendText(contact, payload.body);
+      const [saved] = await Promise.all([
+        this.messageModel.create({ ...base, waMessageId, sendStatus: WhatsappSendStatus.SENT }),
+        this.conversationModel.updateOne(
+          { contact },
+          {
+            $set: {
+              lastOutboundAt: now,
+              lastMessagePreview: payload.body.slice(0, 200),
+              lastMessageDirection: WhatsappDirection.OUTBOUND,
+            },
+          },
+        ),
+      ]);
+      return saved;
+    } catch (err) {
+      await this.messageModel.create({
+        ...base,
+        waMessageId: this.failedMessageId(now, contact),
+        sendStatus: WhatsappSendStatus.FAILED,
+        errorMessage: this.failureReason(err),
+      });
+      throw err;
+    }
+  }
+
+  /** Chats with unread messages, and how many unread messages in total. */
+  async unreadSummary(): Promise<{ chats: number; messages: number }> {
+    const [row] = await this.conversationModel
+      .aggregate<{ chats: number; messages: number }>([
+        { $match: { unreadCount: { $gt: 0 } } },
+        { $group: { _id: null, chats: { $sum: 1 }, messages: { $sum: '$unreadCount' } } },
+      ])
+      .exec();
+    return { chats: row?.chats ?? 0, messages: row?.messages ?? 0 };
+  }
+
+  /**
+   * Sends a file (image, video, audio or document) from the admin inbox, with
+   * an optional caption. Same 24-hour window rule as a typed reply. The thread
+   * stores Meta's media id, so the inbox shows it like a received attachment.
+   */
+  async replyWithMedia(
+    contact: string,
+    file: { buffer: Buffer; mimetype?: string; originalname?: string; size: number },
+    caption?: string,
+  ): Promise<WhatsappMessage> {
+    const conversation = await this.conversationModel.findOne({ contact });
+    if (!conversation) {
+      throw new NotFoundException('No WhatsApp conversation with that number');
+    }
+    if (!this.isWindowOpen(conversation.lastInboundAt)) {
+      throw new BadRequestException(
+        'The 24-hour reply window has closed for this customer. ' +
+          'Only an approved template message can be sent now.',
+      );
+    }
+    const check = checkOutboundMedia(file);
+    if (!check.ok) throw new BadRequestException(check.error);
+    const text = (caption ?? '').trim().slice(0, MAX_CAPTION) || undefined;
+    const sentCaption = check.kind === 'audio' ? undefined : text;
+
+    const now = new Date();
+    const base = {
+      direction: WhatsappDirection.OUTBOUND,
+      contact,
+      from: process.env.WHATSAPP_PHONE_NUMBER_ID ?? 'business',
+      to: contact,
+      type: check.kind,
+      // Shown under the attachment; documents fall back to their name.
+      text: sentCaption ?? (check.kind === 'document' ? check.filename : undefined),
+      mimeType: check.mimeType,
+      raw: { filename: check.filename, size: file.size },
+      sentAt: now,
+      automated: false,
+      handled: true,
+    };
+    let mediaId: string | undefined;
+    try {
+      mediaId = await this.api.uploadMedia(file.buffer, check.mimeType, check.filename);
+      const { waMessageId } = await this.api.sendMedia(contact, check.kind, mediaId, {
+        caption: sentCaption,
+        filename: check.filename,
+      });
+      const [saved] = await Promise.all([
+        this.messageModel.create({
+          ...base,
+          waMessageId,
+          mediaId,
+          sendStatus: WhatsappSendStatus.SENT,
+        }),
+        this.conversationModel.updateOne(
+          { contact },
+          {
+            $set: {
+              lastOutboundAt: now,
+              lastMessagePreview: mediaPreview(check.kind, check.filename, sentCaption),
+              lastMessageDirection: WhatsappDirection.OUTBOUND,
+            },
+          },
+        ),
+      ]);
+      return saved;
+    } catch (err) {
+      await this.messageModel.create({
+        ...base,
+        waMessageId: this.failedMessageId(now, contact),
+        ...(mediaId ? { mediaId } : {}),
+        sendStatus: WhatsappSendStatus.FAILED,
+        errorMessage: this.failureReason(err),
+      });
+      throw err;
+    }
   }
 
   /**

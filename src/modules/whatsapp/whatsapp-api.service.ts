@@ -230,6 +230,95 @@ export class WhatsappApiService {
   }
 
   /**
+   * Interactive message (reply buttons, CTA URL or list). Free-form, so only
+   * inside the 24-hour window — callers check it.
+   */
+  async sendInteractive(to: string, interactive: Record<string, unknown>): Promise<SendTextResult> {
+    const data = await this.request<{ messages?: Array<{ id?: string }> }>(
+      `${this.phoneNumberId}/messages`,
+      {
+        method: 'POST',
+        body: { messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'interactive', interactive },
+      },
+    );
+    const waMessageId = data.messages?.[0]?.id;
+    if (!waMessageId) {
+      throw new BadGatewayException('WhatsApp accepted the send but returned no message id');
+    }
+    return { waMessageId };
+  }
+
+  /**
+   * Uploads a file to Meta for this number and returns its media id. Media
+   * uploaded this way can be sent (and downloaded again) for 30 days.
+   */
+  async uploadMedia(buffer: Buffer, mimeType: string, filename: string): Promise<string> {
+    const form = new FormData();
+    form.append('messaging_product', 'whatsapp');
+    form.append('type', mimeType);
+    form.append('file', new Blob([new Uint8Array(buffer)], { type: mimeType }), filename);
+
+    const path = `${this.phoneNumberId}/media`;
+    let res: Response;
+    try {
+      res = await fetch(`https://graph.facebook.com/${this.version}/${path}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${this.token}` },
+        body: form,
+        // Bigger than a JSON call: up to 16 MB going out.
+        signal: AbortSignal.timeout(60_000),
+      });
+    } catch (err) {
+      const reason = (err as Error).message;
+      this.logger.error(`Graph API media upload failed: ${reason}`);
+      throw Object.assign(new BadGatewayException('WhatsApp API unreachable'), {
+        upstreamDetail: `WhatsApp API unreachable: ${reason}`,
+      });
+    }
+    const text = await res.text();
+    let parsed: { id?: string; error?: GraphError['error'] } = {};
+    try {
+      parsed = text ? JSON.parse(text) : {};
+    } catch {
+      parsed = {};
+    }
+    if (!res.ok || !parsed.id) {
+      const detail =
+        parsed.error?.error_user_msg || parsed.error?.message || text.slice(0, 300) || `HTTP ${res.status}`;
+      this.logger.error(`Graph API ${path} → ${res.status}: ${detail}`);
+      throw upstreamError(res.ok ? 502 : res.status, detail, parsed.error?.code);
+    }
+    return parsed.id;
+  }
+
+  /**
+   * Sends uploaded media. Like free-form text, only inside the 24-hour window.
+   * Audio takes no caption; a document carries its filename for the customer.
+   */
+  async sendMedia(
+    to: string,
+    kind: 'image' | 'video' | 'audio' | 'document',
+    mediaId: string,
+    opts: { caption?: string; filename?: string } = {},
+  ): Promise<SendTextResult> {
+    const media: Record<string, string> = { id: mediaId };
+    if (opts.caption && kind !== 'audio') media.caption = opts.caption;
+    if (kind === 'document' && opts.filename) media.filename = opts.filename;
+    const data = await this.request<{ messages?: Array<{ id?: string }> }>(
+      `${this.phoneNumberId}/messages`,
+      {
+        method: 'POST',
+        body: { messaging_product: 'whatsapp', recipient_type: 'individual', to, type: kind, [kind]: media },
+      },
+    );
+    const waMessageId = data.messages?.[0]?.id;
+    if (!waMessageId) {
+      throw new BadGatewayException('WhatsApp accepted the send but returned no message id');
+    }
+    return { waMessageId };
+  }
+
+  /**
    * Template message — the only thing Meta accepts once the 24-hour window has
    * closed. Body placeholders are positional, so `parameters` must be in
    * {{1}}, {{2}} … order.

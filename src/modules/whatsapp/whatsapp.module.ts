@@ -11,6 +11,8 @@ import { WhatsappApiService } from './whatsapp-api.service';
 import { WhatsappOtpService } from './whatsapp-otp.service';
 import { WhatsappOtpController } from './whatsapp-otp.controller';
 import { WhatsappInboxService } from './whatsapp-inbox.service';
+import { QuickMessagesService } from './quick-messages.service';
+import { Order, OrderSchema } from '../../schemas/order.schema';
 import {
   TribeMember,
   TribeMemberSchema,
@@ -43,6 +45,8 @@ import {
       // Read only, for grouping the inbox by tribe (owner + member numbers).
       { name: TribeMember.name, schema: TribeMemberSchema },
       { name: Tribe.name, schema: TribeSchema },
+      // Read only: a chat's latest order, for quick messages.
+      { name: Order.name, schema: OrderSchema },
     ]),
     // Same secret as auth: OTP proof tokens are read back by the orders module.
     JwtModule.registerAsync({
@@ -63,6 +67,7 @@ import {
     WhatsappApiService,
     WhatsappOtpService,
     WhatsappInboxService,
+    QuickMessagesService,
   ],
   exports: [WhatsappService, WhatsappApiService, WhatsappOtpService],
 })

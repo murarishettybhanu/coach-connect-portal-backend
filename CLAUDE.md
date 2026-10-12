@@ -605,7 +605,16 @@ fields, messages fixed — change both sides together). No permission switch.
   always acks 200). Admin-only: `GET /whatsapp/conversations`,
   `GET /whatsapp/conversations/:contact`, `POST /whatsapp/conversations/:contact/reply`,
   `PATCH /whatsapp/conversations/:contact/read`, `GET /whatsapp/messages?from=&limit=`,
-  `POST /whatsapp/conversations/:contact/template`, `GET /whatsapp/media/:mediaId`,
+  `POST /whatsapp/conversations/:contact/template`,
+  `GET /whatsapp/conversations/:contact/quick-messages?tribeId=` + `POST .../quick-messages/:id`
+  (quick messages — `quick-messages.ts` catalogue: Service / Orders / Feedback / Explore / Tribe, rendered
+  server-side by `QuickMessagesService` with the chat's tribe (owner or member phone; pick one when several)
+  and latest non-rejected order; sent as interactive reply buttons / CTA URL / list, 24-hour window only;
+  every message is tested against WhatsApp's length limits),
+  `GET /whatsapp/unread` (`{ chats, messages }` with unread messages — admin sidebar badge),
+  `POST /whatsapp/conversations/:contact/media` (multipart `file` + optional `caption`; 24-hour window
+  only; types/size caps in `outbound-media.ts`, 16 MB upload ceiling; uploads to Meta then sends by media
+  id, stored like inbound media so `GET /whatsapp/media/:mediaId` serves it back), `GET /whatsapp/media/:mediaId`,
   `GET|PATCH /whatsapp/settings`, `GET|POST /whatsapp/templates`,
   `DELETE /whatsapp/templates/:name`
 
