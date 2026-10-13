@@ -738,6 +738,20 @@ appears in both columns, which is correct, not double counting.
 
 ## Future scope
 
+### Platform customers + saved addresses (planned, not built)
+
+Full plan: `../plans/customer-addresses-and-two-step-checkout.md`. In short:
+- **Today:** an address is copied into every order **and** into each tribe's `tribemembers.addresses[]`.
+- **Planned:** split customer info from addresses at the database level.
+  - `customers`: one per phone, platform-wide.
+  - `customeraddresses`: unique per customer + normalised fingerprint, added only when a new address arrives.
+  - `orders` gain `customerId` and `addressId`, and keep their own address copy as the shipping record.
+  - Members gain `customerId`, and their `addresses[]` is retired.
+- **One shared step** (`resolveAddress`) for every address-writing path.
+- **A public saved-addresses endpoint**, gated by the WhatsApp OTP proof.
+- **Storefront orders** will then require the OTP too, with Landmark and Sector/Village required as on campaigns.
+- **Backfill:** a dry-run-first, idempotent script.
+
 ### WhatsApp alert to an admin number — new restock requests & website inquiries
 
 Today a new restock request (`POST /restock/requests`) or website inquiry
