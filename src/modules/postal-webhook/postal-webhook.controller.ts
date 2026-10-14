@@ -1,12 +1,20 @@
 import {
-  Body,
   Controller,
   HttpCode,
   NotFoundException,
   Param,
   Post,
+  Req,
+  Body,
+  UseGuards,
 } from '@nestjs/common';
-import { SkipThrottle } from '@nestjs/throttler';
+import type { Request } from 'express';
+import { SkipThrottle, Throttle } from '@nestjs/throttler';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { UserRole } from '../../schemas/user.schema';
+import { PostalSyncService } from './postal-sync.service';
 import { PostalWebhookService } from './postal-webhook.service';
 
 /**
@@ -24,15 +32,62 @@ export class PostalWebhookController {
 
   @Post(':token/booking')
   @HttpCode(200)
-  async booking(@Param('token') token: string, @Body() body: unknown) {
-    if (!this.webhook.tokenMatches(token)) throw new NotFoundException();
-    return { success: true, ...(await this.webhook.ingest(body, 'BOOKING')) };
+  booking(@Param('token') token: string, @Req() req: Request) {
+    return this.receive(token, req, 'BOOKING');
   }
 
   @Post(':token/events')
   @HttpCode(200)
-  async events(@Param('token') token: string, @Body() body: unknown) {
+  events(@Param('token') token: string, @Req() req: Request) {
+    return this.receive(token, req, 'OTHER');
+  }
+
+  /**
+   * The body was read by `postalBodyParser` (app.setup.ts): JSON whatever its
+   * Content-Type, raw text kept on `req.postalRaw`. Every valid-token delivery
+   * is logged, readable or not.
+   */
+  private async receive(
+    token: string,
+    req: Request,
+    channel: 'BOOKING' | 'OTHER',
+  ) {
     if (!this.webhook.tokenMatches(token)) throw new NotFoundException();
-    return { success: true, ...(await this.webhook.ingest(body, 'OTHER')) };
+    const raw: string = (req as any).postalRaw ?? '';
+    let result = { received: 0, stored: 0 };
+    let error: string | undefined;
+    try {
+      result = await this.webhook.ingest(req.body, channel);
+    } catch (err) {
+      error = (err as Error).message;
+    }
+    await this.webhook.logDelivery({
+      channel,
+      contentType: String(req.headers['content-type'] ?? ''),
+      bytes: Buffer.byteLength(raw),
+      raw,
+      ...result,
+      ...(error ? { error } : {}),
+    });
+    return { success: true, ...result };
+  }
+}
+
+/** Admin: "Sync with India Post" — see PostalSyncService. */
+@Controller('indiapost')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(UserRole.ADMIN)
+export class PostalSyncController {
+  constructor(private readonly sync: PostalSyncService) {}
+
+  @Post('sync')
+  @HttpCode(200)
+  // Each run can be thousands of upstream lookups.
+  @Throttle({ default: { limit: 4, ttl: 60_000 } })
+  run(
+    @Body('coachId') coachId?: string,
+    @Body('campaignId') campaignId?: string,
+  ) {
+    return this.sync.sync({ coachId, campaignId });
   }
 }

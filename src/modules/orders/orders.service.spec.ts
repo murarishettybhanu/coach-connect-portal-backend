@@ -471,6 +471,20 @@ describe('OrdersService.updateStatus transitions', () => {
       },
     );
 
+    it('Ready to Ship → Delivered sends only the delivered WhatsApp, never the dispatched one', async () => {
+      const { service, orderModel } = setup();
+      const notify = jest
+        .spyOn(service as any, 'notifyCustomerOfStatus')
+        .mockResolvedValue(undefined);
+      orderModel.findOne.mockReturnValue(query(current(OrderStatus.PACKED)));
+      orderModel.findOneAndUpdate.mockReturnValue(
+        query(current(OrderStatus.DELIVERED)),
+      );
+      await deliver(service);
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify).toHaveBeenCalledWith(ORDER_ID, OrderStatus.DELIVERED);
+    });
+
     it('is still refused without the flag', async () => {
       const { service, orderModel } = setup();
       orderModel.findOne.mockReturnValue(query(current(OrderStatus.PACKED)));

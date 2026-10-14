@@ -19,8 +19,10 @@ export class PostalEvent extends Document {
   orderId?: MongooseSchema.Types.ObjectId;
 
   // Which of our two webhook URLs it came to.
-  @Prop({ enum: ['BOOKING', 'OTHER'], required: true })
-  channel: 'BOOKING' | 'OTHER';
+  // BOOKING / OTHER = which webhook URL it came to; SYNC = read from the
+  // tracking API by "Sync with India Post".
+  @Prop({ enum: ['BOOKING', 'OTHER', 'SYNC'], required: true })
+  channel: 'BOOKING' | 'OTHER' | 'SYNC';
 
   @Prop({ default: '' })
   eventCode: string;

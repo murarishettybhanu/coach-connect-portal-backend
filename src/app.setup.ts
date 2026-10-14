@@ -1,5 +1,6 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import helmet from 'helmet';
+import { postalBodyParser } from './modules/postal-webhook/postal-body';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { RejectOperatorKeysPipe } from './common/pipes/reject-operator-keys.pipe';
 
@@ -45,6 +46,10 @@ export function configureApp(app: INestApplication): void {
 
   // Security headers.
   app.use(helmet());
+
+  // India Post webhook: JSON however it's labelled, up to 5 MB. Mounted before
+  // Nest's own parser (application/json only, 100 kb), which then skips it.
+  app.use('/api/indiapost/webhook', ...postalBodyParser);
 
   app.setGlobalPrefix('api');
   app.useGlobalFilters(new AllExceptionsFilter());
