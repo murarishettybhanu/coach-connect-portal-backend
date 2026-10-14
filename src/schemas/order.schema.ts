@@ -56,16 +56,20 @@ export class Order extends Document {
   @Prop()
   approvedAt?: Date;
 
-  @Prop({ type: [{
-    productId: { type: MongooseSchema.Types.ObjectId, ref: 'Product' },
-    quantity: { type: Number, required: true },
-    baseCost: { type: Number, required: true },
-    retailPrice: { type: Number },
-    commission: { type: Number, default: 0 },
-    selected: { type: Boolean, default: true }, // unchecked during approval = not fulfilled
-    customizationType: { type: String }, // TEXT | PHOTO | SIZE (from the product)
-    customizationValue: { type: String }, // the customer-provided value
-  }] })
+  @Prop({
+    type: [
+      {
+        productId: { type: MongooseSchema.Types.ObjectId, ref: 'Product' },
+        quantity: { type: Number, required: true },
+        baseCost: { type: Number, required: true },
+        retailPrice: { type: Number },
+        commission: { type: Number, default: 0 },
+        selected: { type: Boolean, default: true }, // unchecked during approval = not fulfilled
+        customizationType: { type: String }, // TEXT | PHOTO | SIZE (from the product)
+        customizationValue: { type: String }, // the customer-provided value
+      },
+    ],
+  })
   items: {
     productId: MongooseSchema.Types.ObjectId;
     quantity: number;
@@ -160,7 +164,7 @@ export class Order extends Document {
   @Prop()
   deliveredAt?: Date;
 
-  // Latest scan India Post pushed to our webhook (see PostalEvent), for lists
+  // Latest India Post scan (webhook or sync) — the only scan we keep; history is fetched live
   // and the order dialog. Only moves forward in time.
   @Prop({
     type: {
@@ -172,7 +176,12 @@ export class Order extends Document {
     },
     default: undefined,
   })
-  lastPostalEvent?: { code: string; description: string; at: Date; office: string };
+  lastPostalEvent?: {
+    code: string;
+    description: string;
+    at: Date;
+    office: string;
+  };
 
   // When India Post reported the article returned. Flag for the admin only —
   // logging the return (stock, re-send) stays a manual step.
@@ -181,13 +190,15 @@ export class Order extends Document {
 
   // Audit trail of every status transition, newest appended last.
   @Prop({
-    type: [{
-      status: { type: String, required: true },
-      at: { type: Date, required: true },
-      note: { type: String },
-      // Who made the change, for entries an admin caused by hand.
-      by: { type: MongooseSchema.Types.ObjectId, ref: 'User' },
-    }],
+    type: [
+      {
+        status: { type: String, required: true },
+        at: { type: Date, required: true },
+        note: { type: String },
+        // Who made the change, for entries an admin caused by hand.
+        by: { type: MongooseSchema.Types.ObjectId, ref: 'User' },
+      },
+    ],
     default: [],
   })
   statusHistory: {

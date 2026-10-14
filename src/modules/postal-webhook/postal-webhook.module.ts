@@ -5,10 +5,6 @@ import {
   PostalWebhookLog,
   PostalWebhookLogSchema,
 } from '../../schemas/postal-webhook-log.schema';
-import {
-  PostalEvent,
-  PostalEventSchema,
-} from '../../schemas/postal-event.schema';
 import { OrdersModule } from '../orders/orders.module';
 import {
   PostalSyncController,
@@ -21,7 +17,6 @@ import { PostalWebhookService } from './postal-webhook.service';
 @Module({
   imports: [
     MongooseModule.forFeature([
-      { name: PostalEvent.name, schema: PostalEventSchema },
       { name: Order.name, schema: OrderSchema },
       { name: PostalWebhookLog.name, schema: PostalWebhookLogSchema },
     ]),

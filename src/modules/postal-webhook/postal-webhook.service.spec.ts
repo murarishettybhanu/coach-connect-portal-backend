@@ -23,27 +23,17 @@ const event = (code: string, description: string, extra: any = {}) => ({
   ...extra,
 });
 
-function setup(orders: any[], opts: { duplicate?: boolean } = {}) {
-  const eventModel = {
-    exists: jest.fn(() => query(null)),
-    find: jest.fn(() => query([])),
-    create: jest.fn(async (..._args: any[]) => {
-      if (opts.duplicate)
-        throw Object.assign(new Error('dup'), { code: 11000 });
-      return {};
-    }),
-  };
+function setup(orders: any[]) {
   const orderModel = {
     find: jest.fn(() => query(orders)),
     updateOne: jest.fn((..._args: any[]) => query({})),
   };
   const ordersService = { updateStatus: jest.fn().mockResolvedValue({}) };
   const service = new PostalWebhookService(
-    eventModel as any,
     orderModel as any,
     ordersService as any,
   );
-  return { service, eventModel, orderModel, ordersService };
+  return { service, orderModel, ordersService };
 }
 
 const order = (status: OrderStatus, extra: any = {}) => ({
@@ -71,18 +61,17 @@ describe('PostalWebhookService', () => {
     expect(service.tokenMatches('')).toBe(false);
   });
 
-  it('stores the event against the order and keeps its latest scan', async () => {
+  it('keeps only the latest scan on the order (no per-scan history)', async () => {
     const o = order(OrderStatus.DISPATCHED);
-    const { service, eventModel, orderModel, ordersService } = setup([o]);
+    const { service, orderModel, ordersService } = setup([o]);
     const res = await service.ingest(event('BAG_CLOSE', 'Bag Close'), 'OTHER');
     expect(res).toEqual({ received: 1, stored: 1 });
-    expect(eventModel.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        articleNumber: 'CA182468665IN',
-        orderId: o._id,
-        channel: 'OTHER',
-      }),
-    );
+    expect(orderModel.updateOne).toHaveBeenCalledTimes(1);
+    // Forward-only: an older scan arriving late can't replace a newer one.
+    expect(orderModel.updateOne.mock.calls[0][0].$or).toEqual([
+      { lastPostalEvent: { $exists: false } },
+      { 'lastPostalEvent.at': { $lte: expect.any(Date) } },
+    ]);
     expect(
       orderModel.updateOne.mock.calls[0][1].$set.lastPostalEvent,
     ).toMatchObject({
@@ -180,32 +169,25 @@ describe('PostalWebhookService', () => {
     expect(flag).toBeTruthy();
   });
 
-  it('a repeat of a stored scan does nothing', async () => {
-    const { service, ordersService, orderModel } = setup(
-      [order(OrderStatus.NEW)],
-      { duplicate: true },
-    );
-    const res = await service.ingest(
-      event('ITEM_BOOK', 'Item Booked'),
-      'BOOKING',
-    );
-    expect(res).toEqual({ received: 1, stored: 0 });
+  it('a repeated Item Booked on an order already dispatched changes nothing', async () => {
+    const { service, ordersService } = setup([order(OrderStatus.DISPATCHED)]);
+    await service.ingest(event('ITEM_BOOK', 'Item Booked'), 'BOOKING');
+    await service.ingest(event('ITEM_BOOK', 'Item Booked'), 'BOOKING');
     expect(ordersService.updateStatus).not.toHaveBeenCalled();
-    expect(orderModel.updateOne).not.toHaveBeenCalled();
   });
 
-  it('records but touches no order when the number is on several or none', async () => {
+  it('touches no order when the number is on several or none', async () => {
     for (const orders of [
       [order(OrderStatus.NEW), order(OrderStatus.NEW)],
       [],
     ]) {
-      const { service, eventModel, ordersService } = setup(orders);
+      const { service, orderModel, ordersService } = setup(orders);
       const res = await service.ingest(
         event('ITEM_BOOK', 'Item Booked'),
         'BOOKING',
       );
-      expect(res.stored).toBe(1);
-      expect(eventModel.create.mock.calls[0][0].orderId).toBeUndefined();
+      expect(res.stored).toBe(0);
+      expect(orderModel.updateOne).not.toHaveBeenCalled();
       expect(ordersService.updateStatus).not.toHaveBeenCalled();
     }
   });
@@ -221,12 +203,12 @@ describe('PostalWebhookService', () => {
   });
 
   it('ignores a test ping', async () => {
-    const { service, eventModel } = setup([]);
+    const { service, orderModel } = setup([]);
     expect(await service.ingest({ test: true }, 'OTHER')).toEqual({
       received: 0,
       stored: 0,
     });
-    expect(eventModel.create).not.toHaveBeenCalled();
+    expect(orderModel.find).not.toHaveBeenCalled();
   });
 });
 
@@ -256,21 +238,6 @@ describe('PostalWebhookService — review fixes', () => {
     const { service, ordersService } = setup([o]);
     await service.ingest(ev('ITEM_DELIVERY', 'Item Delivered'), 'OTHER');
     expect(ordersService.updateStatus).not.toHaveBeenCalled();
-  });
-
-  it('a "Delivered" for an article with a stored return scan flags instead of delivering', async () => {
-    const o = order(OrderStatus.DISPATCHED);
-    const { service, ordersService, eventModel, orderModel } = setup([o]);
-    (eventModel as any).find = jest.fn(() =>
-      query([{ eventCode: 'ITEM_RETURN', description: 'Item Returned' }]),
-    );
-    await service.ingest(ev('ITEM_DELIVERY', 'Item Delivered'), 'OTHER');
-    expect(ordersService.updateStatus).not.toHaveBeenCalled();
-    expect(
-      orderModel.updateOne.mock.calls.some(
-        (c: any) => c[1].$set?.postalReturnReportedAt,
-      ),
-    ).toBe(true);
   });
 
   it('matches orders whose tracking number is stored in any case / padded', async () => {

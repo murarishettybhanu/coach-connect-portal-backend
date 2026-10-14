@@ -53,7 +53,6 @@ function setup(orders: any[], results: any[] | Error, shared: string[] = []) {
     }),
   };
   const webhook = {
-    storeScan: jest.fn().mockResolvedValue(true),
     recordLatestScan: jest.fn().mockResolvedValue(undefined),
     applyMilestone: jest.fn(async (o: any, m: string, ..._rest: any[]) =>
       m === 'BOOKED' && o.status === 'PACKED'
@@ -168,21 +167,11 @@ describe('PostalSyncService.sync', () => {
       ['EA100000002IN', 'DELIVERED'],
       ['EA100000003IN', 'RETURN_FLAGGED'],
     ]);
-    // Latest scan recorded and scans stored for every order India Post knows.
+    // Only the latest scan is kept, for every order India Post knows.
     expect(webhook.recordLatestScan).toHaveBeenCalledTimes(4);
-    expect(webhook.storeScan).toHaveBeenCalledTimes(4);
     expect(webhook.applyMilestone.mock.calls[1][2]).toEqual(
       new Date('2026-10-12T06:00:00Z'),
     );
-  });
-
-  it("doesn't re-store scans that came from the webhook fallback", async () => {
-    const { svc, webhook } = setup(
-      [order('PACKED', 'EA100000001IN')],
-      [result('EA100000001IN', { source: 'India Post (webhook)' })],
-    );
-    await svc.sync();
-    expect(webhook.storeScan).not.toHaveBeenCalled();
   });
 
   it('batches by 500 and reports a failed batch without touching orders', async () => {
@@ -226,13 +215,12 @@ describe('PostalSyncService — booking and preview', () => {
     expect(PostalSyncService.milestoneFor(r as any)).toBeNull();
   });
 
-  it('preview reports the changes without storing scans or moving orders', async () => {
+  it('preview reports the changes without recording scans or moving orders', async () => {
     const a = order('PACKED', 'EA100000001IN');
     const { svc, webhook } = setup([a], [result('EA100000001IN')]);
     const s = await svc.sync({ dryRun: true });
     expect(s.dryRun).toBe(true);
     expect(s.dispatched).toBe(1);
-    expect(webhook.storeScan).not.toHaveBeenCalled();
     expect(webhook.recordLatestScan).not.toHaveBeenCalled();
     expect((webhook.applyMilestone.mock.calls[0] as any)[4]).toEqual({
       dryRun: true,

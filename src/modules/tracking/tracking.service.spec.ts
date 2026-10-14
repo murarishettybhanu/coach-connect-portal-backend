@@ -73,11 +73,9 @@ function makeService(
   opts: {
     tribe?: unknown;
     orders?: Array<{ trackingNumber?: string }>;
-    pushed?: unknown[];
   } = {},
 ) {
   const api = { trackBulk: jest.fn().mockResolvedValue(articles) };
-  const postalEventModel = { find: jest.fn(() => query(opts.pushed ?? [])) };
   const orderModel = { find: jest.fn(() => query(opts.orders ?? [])) };
   const tribeModel = { findOne: jest.fn(() => query(opts.tribe ?? null)) };
   return {
@@ -85,7 +83,6 @@ function makeService(
       api as unknown as IndiaPostApiService,
       orderModel as unknown as Model<Order>,
       tribeModel as unknown as Model<Tribe>,
-      postalEventModel as any,
     ),
     api,
     orderModel,
@@ -426,68 +423,11 @@ describe('TrackingService ownership (trackManyFor)', () => {
   });
 });
 
-describe('TrackingService — webhook events fallback', () => {
-  const pushed = [
-    {
-      articleNumber: 'CA182468665IN',
-      eventCode: 'ITEM_BOOK',
-      description: 'Item Booked',
-      eventAt: new Date('2026-10-10T05:00:00Z'),
-      office: 'Hyderabad GPO',
-      officeId: '30350001',
-      nonDeliveryReason: '',
-      raw: {
-        booking_office_name: 'Hyderabad GPO',
-        booking_pin: 500001,
-        destination_pincode: 560001,
-        tariff: 42,
-      },
-    },
-    {
-      articleNumber: 'CA182468665IN',
-      eventCode: 'ITEM_DELIVERY',
-      description: 'Item Delivered',
-      eventAt: new Date('2026-10-12T06:00:00Z'),
-      office: 'Koramangala SO',
-      officeId: '21250001',
-      nonDeliveryReason: '',
-      raw: {},
-    },
-  ];
-
-  it('answers from webhook events when the tracking API refuses us', async () => {
-    const { service, api } = makeService([], { pushed });
-    api.trackBulk.mockRejectedValue(
-      new Error("India Post hasn't enabled this API"),
-    );
-    const r = await service.track('CA182468665IN');
-    expect(r).toMatchObject({
-      found: true,
-      delivered: true,
-      currentStatus: 'Item Delivered',
-      bookedAtOffice: 'Hyderabad GPO',
-      originPincode: '500001',
-      destinationPincode: '560001',
-      tariff: 42,
-      source: 'India Post (webhook)',
-    });
-    expect(r.events.map((e) => e.event)).toEqual([
-      'Item Booked',
-      'Item Delivered',
-    ]);
-  });
-
-  it('still fails when the API refuses and nothing was pushed', async () => {
+describe('TrackingService — API failure', () => {
+  it('fails when India Post refuses (nothing is answered from our own records)', async () => {
     const { service, api } = makeService([]);
     api.trackBulk.mockRejectedValue(new Error('nope'));
     await expect(service.track('CA182468665IN')).rejects.toThrow('nope');
-  });
-
-  it('uses webhook events for an article the API does not know', async () => {
-    const { service } = makeService([], { pushed });
-    const r = await service.track('CA182468665IN');
-    expect(r.found).toBe(true);
-    expect(r.source).toBe('India Post (webhook)');
   });
 });
 
@@ -568,30 +508,6 @@ describe('TrackingService — review fixes', () => {
     expect(r.returnToSender).toBe(true);
     expect(r.delivered).toBe(false);
     expect(r.deliveredAt).toBeNull();
-  });
-
-  it('when the API fails, articles without stored scans are "unavailable", not "not found"', async () => {
-    const { service, api } = makeService([], {
-      pushed: [
-        {
-          articleNumber: 'CA100000001IN',
-          eventCode: '',
-          description: 'Item Booked',
-          eventAt: new Date(),
-          office: '',
-          officeId: '',
-          raw: {},
-        },
-      ],
-    });
-    api.trackBulk.mockRejectedValue(new Error('India Post down'));
-    const [known, other] = await service.trackMany([
-      'CA100000001IN',
-      'CA100000002IN',
-    ]);
-    expect(known.found).toBe(true);
-    expect(other).toMatchObject({ available: false, found: false });
-    expect(other.message).toContain('India Post down');
   });
 
   it('reads scan times as IST even when the value says Z', async () => {
