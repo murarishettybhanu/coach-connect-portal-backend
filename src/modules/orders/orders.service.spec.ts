@@ -1299,3 +1299,50 @@ describe('OrdersService — mark delivered by tracking', () => {
     );
   });
 });
+
+describe('applyStatusFilter (admin order lists)', () => {
+  const { applyStatusFilter } = require('./orders.service');
+  it('"PENDING" filters on approval, not order status', () => {
+    expect(applyStatusFilter({}, 'PENDING')).toEqual({
+      $and: [{ approvalStatus: ApprovalStatus.PENDING }],
+    });
+  });
+  it('"NEW" excludes claims still awaiting approval', () => {
+    expect(applyStatusFilter({}, 'NEW')).toEqual({
+      $and: [
+        {
+          status: OrderStatus.NEW,
+          approvalStatus: { $ne: ApprovalStatus.PENDING },
+        },
+      ],
+    });
+  });
+  it('several statuses match any of them, ANDed beside existing conditions', () => {
+    const f = applyStatusFilter(
+      { $and: [{ x: 1 }], approvalStatus: { $ne: 'REJECTED' } },
+      'pending, PACKED,PACKED',
+    );
+    expect(f).toEqual({
+      approvalStatus: { $ne: 'REJECTED' },
+      $and: [
+        { x: 1 },
+        {
+          $or: [
+            { approvalStatus: ApprovalStatus.PENDING },
+            { status: OrderStatus.PACKED },
+          ],
+        },
+      ],
+    });
+    expect(
+      applyStatusFilter({}, ['DISPATCHED', 'DELIVERED']).$and[0].$or,
+    ).toHaveLength(2);
+  });
+  it('none leaves the filter alone; unknown values are refused', () => {
+    expect(applyStatusFilter({ a: 1 }, undefined)).toEqual({ a: 1 });
+    expect(applyStatusFilter({ a: 1 }, ' , ')).toEqual({ a: 1 });
+    expect(() => applyStatusFilter({}, 'NEW,HACKED')).toThrow(
+      'Unknown status: HACKED',
+    );
+  });
+});

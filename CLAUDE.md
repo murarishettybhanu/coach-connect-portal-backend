@@ -588,6 +588,8 @@ fields, messages fixed — change both sides together). No permission switch.
   `POST /`, `PATCH /:id`, `DELETE /:id` (admin only; validated DTOs,
   `kitPrice?: number | null`)
 - **orders**: `GET /me` & `GET /coach` (coach), `GET /pending-approvals` (admin/coach),
+  `GET /paginated` and `/by-coach/:coachId` take `status` as one value or a comma list (any of them;
+  `PENDING` = approval pending, `NEW` excludes those; unknown values 400) via `applyStatusFilter`,
   admin lists `GET /paginated`, `/by-coach/:coachId`, `/returned`, `/rejected`, `/deleted` take
   `campaignId` (comma list; `none` = no campaign) via `andCampaignFilter` in `common/utils/coach-ids.util.ts`,
   `GET /duplicates` (admin; `coachId`, `campaignId`, `status` incl. `PENDING` = awaiting approval, `search`,

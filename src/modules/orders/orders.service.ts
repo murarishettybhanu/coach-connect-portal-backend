@@ -124,6 +124,44 @@ const phoneKeyOf = (v: unknown): string =>
     .replace(/\D/g, '')
     .slice(-10);
 
+/** Values the admin order lists' status filter accepts. */
+export const FILTER_STATUSES = ['PENDING', ...Object.values(OrderStatus)] as string[];
+
+/** One status's condition. "PENDING" = approval pending (those claims are NEW
+ *  while they wait); "NEW" excludes them — they live in the approvals queue. */
+function statusCondition(status: string): Record<string, unknown> {
+  if (status === 'PENDING') return { approvalStatus: ApprovalStatus.PENDING };
+  if (status === OrderStatus.NEW) {
+    return { status: OrderStatus.NEW, approvalStatus: { $ne: ApprovalStatus.PENDING } };
+  }
+  return { status };
+}
+
+/** "NEW,PENDING" / ["NEW","PENDING"] → unique, validated statuses ([] = all). */
+export function parseStatuses(status?: string | string[]): string[] {
+  const list = [status ?? []]
+    .flat()
+    .flatMap((v) => String(v).split(','))
+    .map((v) => v.trim().toUpperCase())
+    .filter(Boolean);
+  const bad = list.filter((v) => !FILTER_STATUSES.includes(v));
+  if (bad.length) throw new BadRequestException(`Unknown status: ${bad.join(', ')}`);
+  return [...new Set(list)];
+}
+
+/**
+ * The admin order lists' status filter — one status or several (any of them).
+ * ANDed in, so it sits alongside the not-rejected rule, the tribe / campaign
+ * filters and the search's own $or.
+ */
+export function applyStatusFilter(filter: Record<string, any>, status?: string | string[]) {
+  const statuses = parseStatuses(status);
+  if (!statuses.length) return filter;
+  const conds = statuses.map(statusCondition);
+  filter.$and = [...(filter.$and ?? []), conds.length === 1 ? conds[0] : { $or: conds }];
+  return filter;
+}
+
 @Injectable()
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
@@ -1285,16 +1323,10 @@ export class OrdersService {
     const filter: any = { ...NOT_REJECTED, coachId, isDeleted: { $ne: true } };
     andCampaignFilter(filter, options.campaignId);
 
-    if (options.status) {
-      filter.status = options.status;
-      // "New" excludes welcome-kit orders still awaiting approval.
-      if (options.status === OrderStatus.NEW) {
-        filter.approvalStatus = { $ne: ApprovalStatus.PENDING };
-      }
-    }
+    applyStatusFilter(filter, options.status);
 
     // Delivered orders sort by delivery time (newest first); fall back to creation time.
-    const sort: any = options.status === OrderStatus.DELIVERED
+    const sort: any = String(options.status ?? '').toUpperCase() === OrderStatus.DELIVERED
       ? { deliveredAt: -1, createdAt: -1 }
       : { createdAt: -1 };
 
@@ -1362,16 +1394,9 @@ export class OrdersService {
     const coaches = coachIdsFilter(options.coachId);
     if (coaches) filter.coachId = coaches;
     andCampaignFilter(filter, options.campaignId);
-    if (options.status) {
-      filter.status = options.status;
-      // "New" excludes welcome-kit orders still awaiting approval — those live in
-      // the approvals queue, not the New shipping bucket.
-      if (options.status === OrderStatus.NEW) {
-        filter.approvalStatus = { $ne: ApprovalStatus.PENDING };
-      }
-    }
+    applyStatusFilter(filter, options.status);
 
-    const sort: any = options.status === OrderStatus.DELIVERED
+    const sort: any = String(options.status ?? '').toUpperCase() === OrderStatus.DELIVERED
       ? { deliveredAt: -1, createdAt: -1 }
       : { createdAt: -1 };
 
