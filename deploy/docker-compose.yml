@@ -39,6 +39,8 @@ services:
       WHATSAPP_DIGEST_TEMPLATE_ID: ${WHATSAPP_DIGEST_TEMPLATE_ID:-1393420296257983}
       # Friday 6pm IST weekly fulfilment report; same on/off switches as above.
       WHATSAPP_WEEKLY_TEMPLATE_ID: ${WHATSAPP_WEEKLY_TEMPLATE_ID:-1638054397686424}
+      # Every-3rd-day 8am IST reminder to owners with pending approvals; same on/off switches.
+      WHATSAPP_APPROVAL_REMINDER_TEMPLATE_ID: ${WHATSAPP_APPROVAL_REMINDER_TEMPLATE_ID:-1520220833273015}
       # India Post external-integration API (consignment tracking): production
       # host; credentials are our customer id + Self-Service Portal password.
       INDIAPOST_BASE_URL: ${INDIAPOST_BASE_URL:-https://app.indiapost.gov.in/beextcustomer}

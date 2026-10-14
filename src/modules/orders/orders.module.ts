@@ -5,6 +5,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { OrdersService } from './orders.service';
 import { DispatchDigestService } from './dispatch-digest.service';
 import { WeeklyReportService } from './weekly-report.service';
+import { ApprovalReminderService } from './approval-reminder.service';
 import { OrdersController } from './orders.controller';
 import { Order, OrderSchema } from '../../schemas/order.schema';
 import { Campaign, CampaignSchema } from '../../schemas/campaign.schema';
@@ -45,7 +46,7 @@ import { TribeMembersModule } from '../tribe-members/tribe-members.module';
       inject: [ConfigService],
     }),
   ],
-  providers: [OrdersService, DispatchDigestService, WeeklyReportService],
+  providers: [OrdersService, DispatchDigestService, WeeklyReportService, ApprovalReminderService],
   controllers: [OrdersController],
   exports: [OrdersService, DispatchDigestService, WeeklyReportService],
 })

@@ -62,6 +62,12 @@ CORS is restricted to the frontend origins in `CORS_ORIGINS`. Also live in `main
   only for the customer's own submissions: a public kit claim with its address, or — on
   address-later campaigns — once per address-page submission. Never for trusted (staff/CSV)
   orders, bulk address uploads, or store purchases.
+- `WHATSAPP_APPROVAL_REMINDER_TEMPLATE_ID` — pending-approval reminder to tribe owners (default
+  `1520220833273015`, `pending_order_approval_reminder`: {{1}} owner name, {{2}} pending count, {{3}}
+  "Kit: N orders, …" on one line; URL button to the owner portal). `ApprovalReminderService`: the cron runs
+  daily at 8 AM IST but only sends on **every 3rd IST day counted from 2026-10-15** (`isReminderDay`), so
+  the spacing survives month ends. Once per day (JobRun). Only active tribes with pending WELCOME_KIT claims.
+  Uses the **same switches as the digest** (test number / `WHATSAPP_DIGEST_ENABLED`).
 - `WHATSAPP_DIGEST_TEST_NUMBER` / `WHATSAPP_DIGEST_ENABLED` / `WHATSAPP_DIGEST_TEMPLATE_ID`
   — the nightly dispatch digest (below). Sending is **off unless one is set**
 - `INDIAPOST_BASE_URL` — India Post external-integration host. Defaults to UAT
@@ -183,6 +189,20 @@ Returned** only sets `postalReturnReportedAt` — logging the return stays manua
 delivered, returned and cancelled orders are never moved; a number on several orders is recorded
 but touches none. `TrackingService` answers from these events when the tracking API refuses us
 or doesn't know an article (`source: 'India Post (webhook)'`).
+
+**Robustness:**
+- `postalBodyParser` (`postal-body.ts`, mounted in `app.setup.ts` before Nest's JSON parser) reads the webhook body as JSON **whatever its Content-Type** (JSON, text/plain, a form field holding JSON), up to **5 MB**.
+- Every valid-token delivery is written to **`postalwebhooklogs`**, kept 30 days (TTL), with content type, bytes, the raw text (first 20 KB), events read and events stored.
+- A delivery with no readable events is logged and **warned**. Look there first if India Post says it's sending and nothing moves.
+
+**Sync with India Post** (`POST /api/indiapost/sync { coachId?, campaignId? }`, admin, 4/min):
+- `PostalSyncService` reads tracking for every **Ready to Ship / Dispatched**, non-pending, non-deleted order with a tracking number, up to 3000, 500 per India Post call.
+- It applies the **same** `PostalWebhookService.applyMilestone` the webhook uses:
+  - **returned** (return to sender, or an "Item Returned" scan): flag only. This wins over delivered, since a delivery after a return is a delivery back to us.
+  - **delivered** → Delivered.
+  - **known to India Post** while Ready to Ship → Dispatched.
+- It records each order's latest scan and stores the scans in `postalevents` (channel `SYNC`).
+- It returns counts and the list of changes. Buttons: All Orders (follows the tribe and campaign filter) and the tribe's Fulfillment Pipeline.
 
 ## Data model (`src/schemas/`)
 
