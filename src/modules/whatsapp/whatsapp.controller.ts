@@ -37,6 +37,7 @@ import { WhatsappService } from './whatsapp.service';
 import { WhatsappApiService } from './whatsapp-api.service';
 import { WhatsappInboxService } from './whatsapp-inbox.service';
 import { QuickMessagesService } from './quick-messages.service';
+import { WhatsappCostService } from './whatsapp-cost.service';
 import { SendReplyDto } from './dto/send-reply.dto';
 import { CreateTemplateDto } from './dto/create-template.dto';
 import { SendTemplateDto } from './dto/send-template.dto';
@@ -124,6 +125,7 @@ export class WhatsappAdminController {
     private readonly api: WhatsappApiService,
     private readonly inbox: WhatsappInboxService,
     private readonly quick: QuickMessagesService,
+    private readonly costs: WhatsappCostService,
   ) {}
 
   // GET /api/whatsapp/conversations — inbox list, most recently active first.
@@ -289,6 +291,21 @@ export class WhatsappAdminController {
   @Roles(UserRole.ADMIN)
   listMessages(@Query('from') from?: string, @Query('limit') limit?: string) {
     return this.whatsappService.list(from, Number(limit) || 50);
+  }
+
+  // GET /api/whatsapp/costs/summary — this month / last month spend (Meta analytics).
+  @Get('costs/summary')
+  @Roles(UserRole.ADMIN)
+  costSummary() {
+    return this.costs.summary();
+  }
+
+  // GET /api/whatsapp/costs/report?month=2026-10&months=6 — month-wise totals,
+  // the month's daily cost by category, and per-template costs.
+  @Get('costs/report')
+  @Roles(UserRole.ADMIN)
+  costReport(@Query('month') month?: string, @Query('months') months?: string) {
+    return this.costs.report(month, Number(months) || 6);
   }
 
   // GET /api/whatsapp/templates — live from Meta, not cached locally, so the

@@ -13,6 +13,27 @@ export interface SendTextResult {
   waMessageId: string;
 }
 
+/** One day of Meta pricing analytics for one pricing category. */
+export interface PricingPoint {
+  start: number;
+  end: number;
+  volume?: number;
+  cost?: number;
+  pricing_category?: string;
+}
+
+/** One day of Meta template analytics for one template. */
+export interface TemplatePoint {
+  template_id: string;
+  start: number;
+  end: number;
+  sent?: number;
+  delivered?: number;
+  read?: number;
+  clicked?: { type: string; button_content?: string; count: number }[];
+  cost?: { type: string; value: number }[];
+}
+
 export interface WhatsappTemplate {
   id: string;
   name: string;
@@ -518,6 +539,67 @@ export class WhatsappApiService {
       `${id}?fields=id,name,language,category,status,components`,
       { method: 'GET' },
     );
+  }
+
+  /**
+   * GET with Meta's cursor paging followed (`paging.next`), concatenating
+   * `pick(page)` from every page. Capped so a runaway cursor can't loop.
+   */
+  private async getAllPages<T>(path: string, pick: (page: any) => T[], maxPages = 20): Promise<T[]> {
+    const out: T[] = [];
+    let page: any = await this.request<any>(path, { method: 'GET' });
+    for (let i = 0; page && i < maxPages; i++) {
+      out.push(...pick(page));
+      const next: string | undefined = page?.paging?.next;
+      if (!next) break;
+      // `next` is a full URL on graph.facebook.com — strip the host/version.
+      const rel = next.replace(/^https:\/\/graph\.facebook\.com\/v[\d.]+\//, '');
+      page = await this.request<any>(rel, { method: 'GET' });
+    }
+    return out;
+  }
+
+  /**
+   * Meta's per-message pricing analytics for the WABA: daily points of
+   * { start, end, volume, cost, pricing_category }. Ranges over a few months
+   * are refused, so callers ask month by month.
+   */
+  async pricingAnalytics(start: number, end: number): Promise<PricingPoint[]> {
+    const field = `pricing_analytics.start(${start}).end(${end}).granularity(DAILY).dimensions(["PRICING_CATEGORY"])`;
+    const data = await this.request<{ pricing_analytics?: { data?: { data_points?: PricingPoint[] }[] } }>(
+      `${this.wabaId}?fields=${encodeURIComponent(field)}`,
+      { method: 'GET' },
+    );
+    return (data.pricing_analytics?.data ?? []).flatMap((d) => d.data_points ?? []);
+  }
+
+  /**
+   * Per-template daily analytics (sent, delivered, read, clicks, cost). Meta
+   * takes at most 10 template ids per call and pages the result.
+   */
+  async templateAnalytics(templateIds: string[], start: number, end: number): Promise<TemplatePoint[]> {
+    const out: TemplatePoint[] = [];
+    for (let i = 0; i < templateIds.length; i += 10) {
+      const q = new URLSearchParams({
+        start: String(start),
+        end: String(end),
+        granularity: 'DAILY',
+        template_ids: JSON.stringify(templateIds.slice(i, i + 10)),
+        metric_types: JSON.stringify(['COST', 'SENT', 'DELIVERED', 'READ', 'CLICKED']),
+      });
+      out.push(
+        ...(await this.getAllPages<TemplatePoint>(`${this.wabaId}/template_analytics?${q}`, (page) =>
+          (page?.data ?? []).flatMap((d: any) => d.data_points ?? []),
+        )),
+      );
+    }
+    return out;
+  }
+
+  /** The WABA's billing currency (e.g. INR). */
+  async accountCurrency(): Promise<string> {
+    const data = await this.request<{ currency?: string }>(`${this.wabaId}?fields=currency`, { method: 'GET' });
+    return data.currency || 'INR';
   }
 
   /** Message templates on the WABA, newest first as Meta returns them. */

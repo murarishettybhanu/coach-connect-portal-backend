@@ -646,6 +646,12 @@ fields, messages fixed — change both sides together). No permission switch.
   `POST /whatsapp/conversations/:contact/media` (multipart `file` + optional `caption`; 24-hour window
   only; types/size caps in `outbound-media.ts`, 16 MB upload ceiling; uploads to Meta then sends by media
   id, stored like inbound media so `GET /whatsapp/media/:mediaId` serves it back), `GET /whatsapp/media/:mediaId`,
+  `GET /whatsapp/costs/summary` (this + last UTC month) and `GET /whatsapp/costs/report?month=YYYY-MM&months=1..12`
+  (`WhatsappCostService`, cached 10 min): Meta's `pricing_analytics` fetched **one month per call** (Meta refuses
+  long ranges and MONTHLY granularity) → totals by category, zero-filled daily series; `template_analytics`
+  (≤ 10 ids per call, paged) → per-template sent/delivered/read/unique clicks/cost. Only the `amount_spent` cost
+  entry is spend (the others are averages). Months are UTC, figures approximate, and the template sum can differ
+  slightly from the pricing total — the response `note` says so. Pure shaping in `whatsapp-costs.ts` (tested),
   `GET|PATCH /whatsapp/settings`, `GET|POST /whatsapp/templates`,
   `DELETE /whatsapp/templates/:name`
 

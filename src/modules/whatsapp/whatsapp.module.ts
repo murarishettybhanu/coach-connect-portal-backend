@@ -12,6 +12,7 @@ import { WhatsappOtpService } from './whatsapp-otp.service';
 import { WhatsappOtpController } from './whatsapp-otp.controller';
 import { WhatsappInboxService } from './whatsapp-inbox.service';
 import { QuickMessagesService } from './quick-messages.service';
+import { WhatsappCostService } from './whatsapp-cost.service';
 import { Order, OrderSchema } from '../../schemas/order.schema';
 import {
   TribeMember,
@@ -68,6 +69,7 @@ import {
     WhatsappOtpService,
     WhatsappInboxService,
     QuickMessagesService,
+    WhatsappCostService,
   ],
   exports: [WhatsappService, WhatsappApiService, WhatsappOtpService],
 })
