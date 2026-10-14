@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { ConflictException, Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { timingSafeEqual } from 'crypto';
@@ -7,6 +7,7 @@ import { PostalEvent } from '../../schemas/postal-event.schema';
 import { PostalWebhookLog } from '../../schemas/postal-webhook-log.schema';
 import { OrdersService } from '../orders/orders.service';
 import {
+  isMovementScan,
   milestoneOf,
   parsePostalPayload,
   type ParsedPostalEvent,
@@ -78,9 +79,8 @@ export class PostalWebhookService {
     const matches: any[] = await this.orderModel
       .find({
         isDeleted: { $ne: true },
-        trackingNumber: {
-          $in: [e.articleNumber, e.articleNumber.toLowerCase()],
-        },
+        // Hand-typed numbers are stored as typed (any case, maybe padded).
+        trackingNumber: new RegExp(`^\\s*${e.articleNumber}\\s*$`, 'i'),
       } as any)
       .select(
         '_id status approvalStatus lastPostalEvent postalReturnReportedAt',
@@ -120,7 +120,24 @@ export class PostalWebhookService {
     try {
       await this.apply(order, e);
     } catch (err) {
-      // The scan is stored; only the order update failed (e.g. it changed meanwhile).
+      // The order changed under us (a concurrent scan or sync): re-read it and
+      // try once more — a retry from India Post would be deduped and lost.
+      if (err instanceof ConflictException) {
+        try {
+          const fresh = await this.orderModel
+            .findById(order._id)
+            .select('_id status approvalStatus postalReturnReportedAt')
+            .lean()
+            .exec();
+          if (fresh) {
+            await this.apply(fresh, e);
+            return true;
+          }
+        } catch (retryErr) {
+          err = retryErr;
+        }
+      }
+      // The scan is stored; only the order update failed.
       this.logger.error(
         `India Post ${e.articleNumber}: couldn't update order ${String(order._id)}: ${(err as Error).message}`,
       );
@@ -130,11 +147,30 @@ export class PostalWebhookService {
 
   /** What a milestone event does to its order. */
   private async apply(order: any, e: ParsedPostalEvent): Promise<void> {
-    await this.applyMilestone(
-      order,
-      milestoneOf(e.eventCode, e.description),
-      e.eventAt,
-      e.articleNumber,
+    // Any real movement scan (bagged, received …) means it was booked, even
+    // if the Item Booked event itself never reached us.
+    let milestone =
+      milestoneOf(e.eventCode, e.description, e.nonDeliveryReason) ??
+      (isMovementScan(e.eventCode, e.description) ? 'BOOKED' : null);
+    // A "delivered" after the parcel was returned is delivery back to us.
+    if (
+      milestone === 'DELIVERED' &&
+      (await this.wasReturned(e.articleNumber))
+    ) {
+      milestone = 'RETURNED';
+    }
+    await this.applyMilestone(order, milestone, e.eventAt, e.articleNumber);
+  }
+
+  /** Whether any stored scan of this article is a return. */
+  private async wasReturned(articleNumber: string): Promise<boolean> {
+    const rows: any[] = await this.eventModel
+      .find({ articleNumber } as any)
+      .select('eventCode description')
+      .lean()
+      .exec();
+    return rows.some(
+      (r) => milestoneOf(r.eventCode, r.description) === 'RETURNED',
     );
   }
 
@@ -156,6 +192,7 @@ export class PostalWebhookService {
     milestone: PostalMilestone,
     at: Date,
     articleNumber: string,
+    opts: { dryRun?: boolean } = {},
   ): Promise<'DISPATCHED' | 'DELIVERED' | 'RETURN_FLAGGED' | null> {
     const id = String(order._id);
     const awaitingApproval = order.approvalStatus === ApprovalStatus.PENDING;
@@ -166,6 +203,7 @@ export class PostalWebhookService {
           order.status as OrderStatus,
         )
       ) {
+        if (opts.dryRun) return 'DISPATCHED';
         await this.orders.updateStatus(id, OrderStatus.DISPATCHED);
         this.logger.log(
           `Order ${id} dispatched from India Post booking of ${articleNumber}`,
@@ -173,20 +211,22 @@ export class PostalWebhookService {
         return 'DISPATCHED';
       }
     } else if (milestone === 'DELIVERED') {
+      // Return wins: once India Post reported it returned, a later "delivered"
+      // is the parcel reaching us, not the customer.
+      if (order.postalReturnReportedAt) return null;
       if (
         !awaitingApproval &&
         [OrderStatus.NEW, OrderStatus.PACKED, OrderStatus.DISPATCHED].includes(
           order.status as OrderStatus,
         )
       ) {
+        if (opts.dryRun) return 'DELIVERED';
         await this.orders.updateStatus(
           id,
           OrderStatus.DELIVERED,
           undefined,
           undefined,
-          {
-            skipDispatch: true,
-          },
+          { skipDispatch: true, note: 'Delivered per India Post' },
         );
         this.logger.log(
           `Order ${id} delivered per India Post (${articleNumber})`,
@@ -195,6 +235,7 @@ export class PostalWebhookService {
       }
     } else if (milestone === 'RETURNED') {
       if (!order.postalReturnReportedAt) {
+        if (opts.dryRun) return 'RETURN_FLAGGED';
         await this.orderModel
           .updateOne({ _id: order._id } as any, {
             $set: { postalReturnReportedAt: at },

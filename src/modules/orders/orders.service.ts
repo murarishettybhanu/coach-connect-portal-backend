@@ -866,6 +866,18 @@ export class OrdersService {
   ): Promise<Order> {
     const code = (trackingNumber || '').trim();
     if (!code) throw new BadRequestException('Enter or scan a tracking number');
+    // Scanned or typed in any case; stored numbers may be padded or lowercase.
+    const escaped = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const numberMatch = new RegExp(`^\\s*${escaped}\\s*$`, 'i');
+    // A number on several orders is ambiguous — refuse rather than return a random one.
+    const onOrders = await this.orderModel
+      .countDocuments({ trackingNumber: numberMatch, isDeleted: { $ne: true } } as any)
+      .exec();
+    if (onOrders > 1) {
+      throw new BadRequestException(
+        `Tracking number ${code} is on ${onOrders} orders — log the return from the order itself`,
+      );
+    }
 
     // Atomic transition: only a dispatched/delivered parcel becomes RETURNED,
     // so scanning the same label twice (or two people at once) restocks once.
@@ -873,7 +885,7 @@ export class OrdersService {
     const order = await this.orderModel
       .findOneAndUpdate(
         {
-          trackingNumber: code,
+          trackingNumber: numberMatch,
           isDeleted: { $ne: true },
           status: { $in: [OrderStatus.DISPATCHED, OrderStatus.DELIVERED] },
         } as any,
@@ -886,7 +898,7 @@ export class OrdersService {
       .exec();
     if (!order) {
       const existing = await this.orderModel
-        .findOne({ trackingNumber: code, isDeleted: { $ne: true } } as any)
+        .findOne({ trackingNumber: numberMatch, isDeleted: { $ne: true } } as any)
         .select('status')
         .exec();
       if (!existing) {
@@ -1541,7 +1553,8 @@ export class OrdersService {
     deliveryType?: BarcodeType,
     // Admin "Mark Delivered" tool only: a New / Ready to Ship order may go
     // straight to Delivered (the parcel is known to have arrived).
-    opts: { skipDispatch?: boolean } = {},
+    // `note` labels the skipped-dispatch history entries (default: the Mark Delivered tool).
+    opts: { skipDispatch?: boolean; note?: string } = {},
   ): Promise<Order> {
     const now = new Date();
     const order = await this.orderModel
@@ -1630,8 +1643,8 @@ export class OrdersService {
             statusHistory: skippingDispatch
               ? {
                   $each: [
-                    { status: OrderStatus.DISPATCHED, at: now, note: 'Marked delivered from barcode list' },
-                    { status, at: now, note: 'Marked delivered from barcode list' },
+                    { status: OrderStatus.DISPATCHED, at: now, note: opts.note ?? 'Marked delivered from barcode list' },
+                    { status, at: now, note: opts.note ?? 'Marked delivered from barcode list' },
                   ],
                 }
               : { status, at: now },

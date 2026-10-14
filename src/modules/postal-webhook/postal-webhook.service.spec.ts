@@ -26,6 +26,7 @@ const event = (code: string, description: string, extra: any = {}) => ({
 function setup(orders: any[], opts: { duplicate?: boolean } = {}) {
   const eventModel = {
     exists: jest.fn(() => query(null)),
+    find: jest.fn(() => query([])),
     create: jest.fn(async (..._args: any[]) => {
       if (opts.duplicate)
         throw Object.assign(new Error('dup'), { code: 11000 });
@@ -105,6 +106,39 @@ describe('PostalWebhookService', () => {
     },
   );
 
+  it('a movement scan (Bag Received) dispatches a Ready to Ship order even without Item Booked', async () => {
+    const o = order(OrderStatus.PACKED);
+    const { service, ordersService } = setup([o]);
+    await service.ingest(event('BAG_RECEIVED', 'Bag Received'), 'OTHER');
+    expect(ordersService.updateStatus).toHaveBeenCalledWith(
+      String(o._id),
+      OrderStatus.DISPATCHED,
+    );
+  });
+
+  it('a pickup request never dispatches', async () => {
+    const o = order(OrderStatus.PACKED);
+    const { service, ordersService } = setup([o]);
+    await service.ingest(
+      event('PICKUP_REQUEST', 'Pickup Request Raised'),
+      'OTHER',
+    );
+    expect(ordersService.updateStatus).not.toHaveBeenCalled();
+  });
+
+  it('applyMilestone dryRun reports the change but does nothing', async () => {
+    const o = order(OrderStatus.DISPATCHED);
+    const { service, ordersService, orderModel } = setup([o]);
+    await expect(
+      service.applyMilestone(o, 'DELIVERED', new Date(), 'X', { dryRun: true }),
+    ).resolves.toBe('DELIVERED');
+    await expect(
+      service.applyMilestone(o, 'RETURNED', new Date(), 'X', { dryRun: true }),
+    ).resolves.toBe('RETURN_FLAGGED');
+    expect(ordersService.updateStatus).not.toHaveBeenCalled();
+    expect(orderModel.updateOne).not.toHaveBeenCalled();
+  });
+
   it('Item Delivered delivers (skipping dispatch if needed)', async () => {
     const o = order(OrderStatus.PACKED);
     const { service, ordersService } = setup([o]);
@@ -114,7 +148,7 @@ describe('PostalWebhookService', () => {
       OrderStatus.DELIVERED,
       undefined,
       undefined,
-      { skipDispatch: true },
+      { skipDispatch: true, note: 'Delivered per India Post' },
     );
   });
 
@@ -193,5 +227,84 @@ describe('PostalWebhookService', () => {
       stored: 0,
     });
     expect(eventModel.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('PostalWebhookService — review fixes', () => {
+  const { ConflictException } = require('@nestjs/common');
+  const order = (status: OrderStatus, extra: any = {}) => ({
+    _id: new Types.ObjectId(),
+    status,
+    approvalStatus: ApprovalStatus.APPROVED,
+    ...extra,
+  });
+  const ev = (code: string, description: string, extra: any = {}) => ({
+    article_number: 'CA182468665IN',
+    event_date: '2026-10-14',
+    event_time: '10:00:00',
+    event_code: code,
+    event_description: description,
+    event_office_name: 'X',
+    event_office_facility_id: '1',
+    ...extra,
+  });
+
+  it('a "Delivered" after the order was flagged returned does not deliver it', async () => {
+    const o = order(OrderStatus.DISPATCHED, {
+      postalReturnReportedAt: new Date(),
+    });
+    const { service, ordersService } = setup([o]);
+    await service.ingest(ev('ITEM_DELIVERY', 'Item Delivered'), 'OTHER');
+    expect(ordersService.updateStatus).not.toHaveBeenCalled();
+  });
+
+  it('a "Delivered" for an article with a stored return scan flags instead of delivering', async () => {
+    const o = order(OrderStatus.DISPATCHED);
+    const { service, ordersService, eventModel, orderModel } = setup([o]);
+    (eventModel as any).find = jest.fn(() =>
+      query([{ eventCode: 'ITEM_RETURN', description: 'Item Returned' }]),
+    );
+    await service.ingest(ev('ITEM_DELIVERY', 'Item Delivered'), 'OTHER');
+    expect(ordersService.updateStatus).not.toHaveBeenCalled();
+    expect(
+      orderModel.updateOne.mock.calls.some(
+        (c: any) => c[1].$set?.postalReturnReportedAt,
+      ),
+    ).toBe(true);
+  });
+
+  it('matches orders whose tracking number is stored in any case / padded', async () => {
+    const { service, orderModel } = setup([order(OrderStatus.PACKED)]);
+    await service.ingest(ev('ITEM_BOOK', 'Item Booked'), 'BOOKING');
+    const re = (orderModel.find.mock.calls[0] as any)[0]
+      .trackingNumber as RegExp;
+    expect(re.test('Ca182468665in')).toBe(true);
+    expect(re.test('  CA182468665IN ')).toBe(true);
+    expect(re.test('CA182468665INX')).toBe(false);
+  });
+
+  it('retries once when the order changed meanwhile (conflict)', async () => {
+    const o = order(OrderStatus.PACKED);
+    const { service, ordersService, orderModel } = setup([o]);
+    ordersService.updateStatus
+      .mockRejectedValueOnce(new ConflictException('changed'))
+      .mockResolvedValueOnce({});
+    (orderModel as any).findById = jest.fn(() =>
+      query({ ...o, status: OrderStatus.PACKED }),
+    );
+    await service.ingest(ev('ITEM_BOOK', 'Item Booked'), 'BOOKING');
+    expect(ordersService.updateStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it('a non-delivery reason keeps a "delivered" code from delivering', async () => {
+    const o = order(OrderStatus.DISPATCHED);
+    const { service, ordersService } = setup([o]);
+    await service.ingest(
+      ev('ITEM_DELIVERY', 'Item Delivered', {
+        non_delivery_reason: 'Door locked',
+      }),
+      'OTHER',
+    );
+    expect(ordersService.updateStatus).not.toHaveBeenCalled();
   });
 });

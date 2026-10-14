@@ -202,7 +202,16 @@ or doesn't know an article (`source: 'India Post (webhook)'`).
   - **delivered** → Delivered.
   - **known to India Post** while Ready to Ship → Dispatched.
 - It records each order's latest scan and stores the scans in `postalevents` (channel `SYNC`).
-- It returns counts and the list of changes. Buttons: All Orders (follows the tribe and campaign filter) and the tribe's Fulfillment Pipeline.
+- It returns counts and the list of changes.
+
+**Classification rules** (`postal-event-rules.ts`, reviewed 2026-10-14; keep them strict):
+- **RETURNED** is checked first: Return… / RTS / "to sender" / "sent back". So "Delivered to sender" is a **return**.
+- **DELIVERED** needs the word *Delivered*, or the bare code ITEM_DELIVERY / DELIVERED. It must have no not / non / un- / failed / unsuccessful / attempted / intimation, and no `non_delivery_reason`. "Delivery Office" and "Out for delivery" are movement, not delivery.
+- **Return wins:** once an order has `postalReturnReportedAt`, or the article has a stored return scan, a later "Delivered" never delivers it.
+- **Dispatched** comes from `isMovementScan`: booked / bagged / received / dispatched / on hold / not delivered / intimation… but **never** pickup request / pre-advice / manifest / label.
+- **Times:** India Post's clock is IST even where the value says "Z". Tracking-API scans are rebuilt as `date + time` at +05:30. Webhook times are `event_date + event_time` at IST (H:MM ok; a missing date means today's IST date).
+- **Sync specifics:** a **preview** (`dryRun`) reports without writing or messaging. Numbers on several orders are skipped (`sharedNumber`). Articles the API couldn't check count as `failed`, not "not found".
+- **Matching:** the webhook and `markReturned` match tracking numbers case-insensitively. `markReturned` refuses a number that is on several orders. Buttons: All Orders (follows the tribe and campaign filter) and the tribe's Fulfillment Pipeline.
 
 ## Data model (`src/schemas/`)
 

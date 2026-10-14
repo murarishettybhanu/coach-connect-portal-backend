@@ -11,7 +11,11 @@ import {
   type TrackingResult,
 } from '../tracking/tracking.service';
 import { PostalWebhookService } from './postal-webhook.service';
-import { milestoneOf, type PostalMilestone } from './postal-event-rules';
+import {
+  isMovementScan,
+  milestoneOf,
+  type PostalMilestone,
+} from './postal-event-rules';
 
 const ARTICLE_RE = /^[A-Z]{2}\d{9}[A-Z]{2}$/;
 const BATCH = 500; // India Post's bulk tracking limit per call
@@ -27,6 +31,8 @@ export type SyncChange = {
 };
 
 export type SyncSummary = {
+  /** Preview: what would change — nothing was written or sent. */
+  dryRun: boolean;
   checked: number;
   notFound: number;
   dispatched: number;
@@ -34,6 +40,8 @@ export type SyncSummary = {
   returnsFlagged: number;
   unchanged: number;
   failed: number;
+  /** Skipped: the tracking number is on more than one order. */
+  sharedNumber: number;
   changes: SyncChange[];
   errors: string[];
 };
@@ -67,12 +75,15 @@ export class PostalSyncService {
       r.events.some((e) => milestoneOf('', e.event) === 'RETURNED');
     if (returned) return 'RETURNED';
     if (r.delivered) return 'DELIVERED';
-    return 'BOOKED';
+    // Only a real booking / movement scan means India Post has the parcel — a
+    // pickup request or pre-advice record must not mark it Dispatched.
+    return r.events.some((e) => isMovementScan('', e.event)) ? 'BOOKED' : null;
   }
 
   async sync(
-    opts: { coachId?: string; campaignId?: string } = {},
+    opts: { coachId?: string; campaignId?: string; dryRun?: boolean } = {},
   ): Promise<SyncSummary> {
+    const dryRun = !!opts.dryRun;
     const filter: any = {
       status: { $in: [OrderStatus.PACKED, OrderStatus.DISPATCHED] },
       isDeleted: { $ne: true },
@@ -95,6 +106,7 @@ export class PostalSyncService {
       .exec();
 
     const summary: SyncSummary = {
+      dryRun,
       checked: 0,
       notFound: 0,
       dispatched: 0,
@@ -102,6 +114,7 @@ export class PostalSyncService {
       returnsFlagged: 0,
       unchanged: 0,
       failed: 0,
+      sharedNumber: 0,
       changes: [],
       errors: [],
     };
@@ -112,6 +125,35 @@ export class PostalSyncService {
     const valid = orders.filter((o) => ARTICLE_RE.test(numberOf(o)));
     summary.failed += orders.length - valid.length; // unreadable tracking numbers
     const numbers = [...new Set(valid.map(numberOf))];
+
+    // A number on several (non-deleted) orders — any status — is a data
+    // problem: touch none of them, as the webhook and Mark Delivered refuse too.
+    const shared = new Set<string>(
+      numbers.length
+        ? (
+            await this.orderModel
+              .aggregate<{
+                _id: string;
+              }>([
+                {
+                  $match: {
+                    isDeleted: { $ne: true },
+                    trackingNumber: { $type: 'string' },
+                  },
+                },
+                {
+                  $project: {
+                    key: { $toUpper: { $trim: { input: '$trackingNumber' } } },
+                  },
+                },
+                { $match: { key: { $in: numbers } } },
+                { $group: { _id: '$key', n: { $sum: 1 } } },
+                { $match: { n: { $gt: 1 } } },
+              ])
+              .exec()
+          ).map((g) => g._id)
+        : [],
+    );
 
     const results = new Map<string, TrackingResult>();
     for (let i = 0; i < numbers.length; i += BATCH) {
@@ -129,9 +171,16 @@ export class PostalSyncService {
 
     for (const order of valid) {
       const number = numberOf(order);
+      if (shared.has(number)) {
+        summary.sharedNumber++;
+        continue;
+      }
       const r = results.get(number);
-      if (!r) {
+      if (!r || !r.available) {
+        // Couldn't be checked (the API failed for it) — not "unknown to India Post".
         summary.failed++;
+        if (r?.message && !summary.errors.includes(r.message))
+          summary.errors.push(r.message);
         continue;
       }
       summary.checked++;
@@ -141,7 +190,7 @@ export class PostalSyncService {
       }
       try {
         // Keep the scans with the webhook's (unless they came from there).
-        if (!r.source.includes('webhook')) {
+        if (!dryRun && !r.source.includes('webhook')) {
           for (const e of r.events) {
             const at = new Date(e.timestamp);
             if (Number.isNaN(at.getTime())) continue;
@@ -160,7 +209,11 @@ export class PostalSyncService {
           }
         }
         const last = r.events[r.events.length - 1];
-        if (last && !Number.isNaN(new Date(last.timestamp).getTime())) {
+        if (
+          !dryRun &&
+          last &&
+          !Number.isNaN(new Date(last.timestamp).getTime())
+        ) {
           await this.webhook.recordLatestScan(order._id, {
             code: last.eventType,
             description: last.event,
@@ -176,6 +229,9 @@ export class PostalSyncService {
           milestone,
           at,
           number,
+          {
+            dryRun,
+          },
         );
         if (!change) {
           summary.unchanged++;
@@ -203,7 +259,7 @@ export class PostalSyncService {
     }
 
     this.logger.log(
-      `India Post sync: ${summary.checked} checked, ${summary.dispatched} dispatched, ${summary.delivered} delivered, ${summary.returnsFlagged} returns flagged, ${summary.notFound} not found, ${summary.failed} failed`,
+      `India Post sync${dryRun ? ' (preview)' : ''}: ${summary.checked} checked, ${summary.dispatched} dispatched, ${summary.delivered} delivered, ${summary.returnsFlagged} returns flagged, ${summary.notFound} not found, ${summary.failed} failed`,
     );
     return summary;
   }

@@ -87,7 +87,9 @@ export class PostalSyncController {
   run(
     @Body('coachId') coachId?: string,
     @Body('campaignId') campaignId?: string,
+    // Preview: report what would change without writing or messaging anyone.
+    @Body('dryRun') dryRun?: boolean,
   ) {
-    return this.sync.sync({ coachId, campaignId });
+    return this.sync.sync({ coachId, campaignId, dryRun: dryRun === true });
   }
 }

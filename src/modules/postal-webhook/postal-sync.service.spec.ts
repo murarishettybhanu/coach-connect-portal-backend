@@ -39,8 +39,13 @@ const result = (n: string, over: any = {}) => ({
   ...over,
 });
 
-function setup(orders: any[], results: any[] | Error) {
-  const orderModel = { find: jest.fn(() => query(orders)) };
+function setup(orders: any[], results: any[] | Error, shared: string[] = []) {
+  const orderModel = {
+    find: jest.fn(() => query(orders)),
+    aggregate: jest.fn(() => ({
+      exec: jest.fn().mockResolvedValue(shared.map((k) => ({ _id: k }))),
+    })),
+  };
   const tracking = {
     trackMany: jest.fn(async (nums: string[]) => {
       if (results instanceof Error) throw results;
@@ -200,5 +205,72 @@ describe('PostalSyncService.sync', () => {
     expect(s.errors).toEqual(["India Post hasn't enabled this API"]);
     expect(s.failed).toBe(1);
     expect(failing.webhook.applyMilestone).not.toHaveBeenCalled();
+  });
+});
+
+describe('PostalSyncService — booking and preview', () => {
+  it('a pickup request alone (not yet handed over) changes nothing', () => {
+    const r = result('X', {
+      events: [
+        {
+          timestamp: '2026-10-10T05:00:00Z',
+          event: 'Pickup Request Raised',
+          eventType: '',
+          office: '',
+          pincode: '',
+          remarks: '',
+          rts: false,
+        },
+      ],
+    });
+    expect(PostalSyncService.milestoneFor(r as any)).toBeNull();
+  });
+
+  it('preview reports the changes without storing scans or moving orders', async () => {
+    const a = order('PACKED', 'EA100000001IN');
+    const { svc, webhook } = setup([a], [result('EA100000001IN')]);
+    const s = await svc.sync({ dryRun: true });
+    expect(s.dryRun).toBe(true);
+    expect(s.dispatched).toBe(1);
+    expect(webhook.storeScan).not.toHaveBeenCalled();
+    expect(webhook.recordLatestScan).not.toHaveBeenCalled();
+    expect((webhook.applyMilestone.mock.calls[0] as any)[4]).toEqual({
+      dryRun: true,
+    });
+  });
+});
+
+describe('PostalSyncService — review fixes', () => {
+  it('skips numbers that are on more than one order', async () => {
+    const a = order('PACKED', 'EA100000001IN');
+    const { svc, webhook } = setup(
+      [a],
+      [result('EA100000001IN')],
+      ['EA100000001IN'],
+    );
+    const s = await svc.sync();
+    expect(s.sharedNumber).toBe(1);
+    expect(webhook.applyMilestone).not.toHaveBeenCalled();
+  });
+
+  it('counts an article that could not be checked as failed, with the reason', async () => {
+    const a = order('PACKED', 'EA100000001IN');
+    const { svc, webhook } = setup(
+      [a],
+      [
+        result('EA100000001IN', {
+          available: false,
+          found: false,
+          message: 'India Post down',
+        }),
+      ],
+    );
+    const s = await svc.sync();
+    expect(s).toMatchObject({
+      failed: 1,
+      notFound: 0,
+      errors: ['India Post down'],
+    });
+    expect(webhook.applyMilestone).not.toHaveBeenCalled();
   });
 });

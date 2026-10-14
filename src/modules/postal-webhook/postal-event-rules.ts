@@ -55,41 +55,82 @@ export function parsePostalPayload(body: unknown): ParsedPostalEvent[] {
   return out;
 }
 
-/** "2025-11-09" + "08:37:52", in IST. Falls back to now when missing/garbled. */
+/** "2025-11-09" + "08:37:52", in IST. Missing time → midnight; missing date → today (IST). */
 export function eventTime(date: string, time: string): Date {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    const t = /^\d{2}:\d{2}(:\d{2})?$/.test(time)
-      ? time.length === 5
-        ? `${time}:00`
-        : time
-      : '00:00:00';
-    const d = new Date(`${date}T${t}+05:30`);
-    if (!Number.isNaN(d.getTime())) return d;
-  }
-  return new Date();
+  const m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(time);
+  const t = m ? `${m[1].padStart(2, '0')}:${m[2]}:${m[3] ?? '00'}` : '00:00:00';
+  // No usable date: take today's IST date (not "now"), so India Post retrying
+  // the same event lands on the same instant and is recognised as a repeat.
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(date)
+    ? date
+    : new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
+  const d = new Date(`${day}T${t}+05:30`);
+  return Number.isNaN(d.getTime()) ? new Date(`${day}T00:00:00+05:30`) : d;
 }
 
 /**
  * What an event means for the order. Matched on the code and the description,
- * since India Post's exact codes beyond ITEM_BOOK aren't documented.
- * "Item not Delivered" / non-delivery / delivery attempts are NOT deliveries.
+ * since India Post's exact codes beyond ITEM_BOOK aren't documented. Strict on
+ * purpose — a wrong DELIVERED tells the customer their parcel arrived:
+ * - anything going back to us ("Item Returned", "Delivered to sender", RTS)
+ *   is RETURNED, checked first;
+ * - DELIVERED needs the word "Delivered" (or the bare code ITEM_DELIVERY /
+ *   DELIVERED) and none of: not / non / un- / failed / unsuccessful /
+ *   attempted / intimation — and never when a non-delivery reason is given.
+ *   "Delivery Office", "Out for delivery" etc. are movement, not delivery.
  */
 export function milestoneOf(
   eventCode: string,
   description: string,
+  nonDeliveryReason = '',
 ): PostalMilestone {
+  const norm = (v: string) =>
+    v.toUpperCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const code = norm(eventCode);
+  const text = `${code} ${norm(description)}`;
+  if (/\bRETURN|\bRTS\b|TO SENDER|SENT BACK/.test(text)) return 'RETURNED';
+  if (/\bITEM BOOK|\bBOOKED\b/.test(text) && !/\bCANCEL/.test(text))
+    return 'BOOKED';
+  const negated =
+    /\b(NOT|NON|UN|UNDELIVERED|FAIL\w*|UNSUCCESS\w*|ATTEMPT\w*|INTIMATION)\b/.test(
+      text,
+    );
+  const says =
+    /\bDELIVERED\b/.test(text) ||
+    [
+      'ITEM DELIVERY',
+      'DELIVERED',
+      'ITEM DELIVERED',
+      'DELIVERY CONFIRMED',
+    ].includes(code);
+  if (says && !negated && !nonDeliveryReason.trim()) return 'DELIVERED';
+  return null;
+}
+
+/**
+ * Whether a scan means India Post physically has the parcel (booked, bagged,
+ * received, dispatched, out for delivery …). Records made before the parcel
+ * is handed over — a pickup request, pre-advice / manifest, a label — don't
+ * count, so they never mark an order Dispatched.
+ */
+export function isMovementScan(
+  eventCode: string,
+  description: string,
+): boolean {
   const text = `${eventCode} ${description}`
     .toUpperCase()
     .replace(/[_-]+/g, ' ');
-  if (/\bRETURN/.test(text) || /\bRTS\b/.test(text)) return 'RETURNED';
-  if (/\bITEM BOOK/.test(text)) return 'BOOKED';
+  if (!text.trim()) return false;
   if (
-    /\bDELIVER/.test(text) &&
-    !/\b(NOT|NON|UN|UNDELIVERED|ATTEMPT\w*|INTIMATION|OUT FOR|FOR DELIVERY)\b/.test(
+    /\bPICK ?UP\b|PRE ?ADVICE|MANIFEST|REQUEST RAISED|\bLABEL\b|ORDER (CREATED|PLACED)|\bCANCEL/.test(
       text,
     )
   ) {
-    return 'DELIVERED';
+    return false;
   }
-  return null;
+  if (milestoneOf(eventCode, description)) return true;
+  // On hold / not delivered / intimation / attempted all mean India Post has it.
+  return /\b(BOOK|BAG|DISPATCH|DESPATCH|RECEIV|TRANSIT|OUT FOR|TAKEN OUT|REDIRECT|ARRIV|SORT|FORWARD|DELIVER|INTIMATION|ATTEMPT)|HOLD/.test(
+    text,
+  );
 }

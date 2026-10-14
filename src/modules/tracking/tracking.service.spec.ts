@@ -27,7 +27,7 @@ const SAMPLE: IndiaPostArticle = {
   },
   tracking_details: [
     {
-      date: '2026-09-07T15:24:12Z',
+      date: '2026-09-07T09:54:12.000Z',
       time: '15:24:12',
       office: 'Kalanjoor SO',
       officeid: '22660021',
@@ -112,7 +112,7 @@ describe('TrackingService', () => {
     ]);
     expect(result.currentStatus).toBe('Item Kept on Hold');
     expect(result.currentStatusType).toBe('ItemKeptOnHold');
-    expect(result.lastUpdatedAt).toBe('2026-09-07T15:24:12Z');
+    expect(result.lastUpdatedAt).toBe('2026-09-07T09:54:12.000Z');
     expect(result.bookedAt).toBe('2026-09-05T23:24:16.038+05:30');
 
     expect(result.articleType).toBe('SP_INLAND_PARCEL');
@@ -288,10 +288,10 @@ describe('TrackingService — live API shapes', () => {
 
     // Without this the whole day collapses to 00:00 and same-day scans tie.
     expect(result.events.map((e) => e.timestamp)).toEqual([
-      '2026-02-19T17:44:15Z',
-      '2026-02-19T18:20:45Z',
+      '2026-02-19T12:14:15.000Z',
+      '2026-02-19T12:50:45.000Z',
     ]);
-    expect(result.lastUpdatedAt).toBe('2026-02-19T18:20:45Z');
+    expect(result.lastUpdatedAt).toBe('2026-02-19T12:50:45.000Z');
     expect(result.currentStatus).toBe('Item Received');
   });
 
@@ -343,7 +343,7 @@ describe('TrackingService — live API shapes', () => {
 
     expect(result.found).toBe(true);
     expect(result.delivered).toBe(true);
-    expect(result.bookedAt).toBe('2025-06-25T13:35:26Z');
+    expect(result.bookedAt).toBe('2025-06-25T08:05:26.000Z');
   });
 });
 
@@ -488,5 +488,130 @@ describe('TrackingService — webhook events fallback', () => {
     const r = await service.track('CA182468665IN');
     expect(r.found).toBe(true);
     expect(r.source).toBe('India Post (webhook)');
+  });
+});
+
+describe('TrackingService — not-delivered scans', () => {
+  it('"Item not Delivered" and "not delivered" status are not deliveries', async () => {
+    const article: any = {
+      booking_details: {
+        article_number: 'CA182468665IN',
+        booked_on: '2026-10-10T05:00:00Z',
+        booked_at: 'Pune HO',
+      },
+      tracking_details: [
+        {
+          date: '2026-10-10T05:00:00Z',
+          event: 'Item Booked',
+          office: 'Pune HO',
+        },
+        {
+          date: '2026-10-12T05:00:00Z',
+          event: 'Item not Delivered',
+          office: 'Koramangala SO',
+        },
+      ],
+      del_status: { del_status: 'not delivered' },
+    };
+    const { service } = makeService([article]);
+    const r = await service.track('CA182468665IN');
+    expect(r.found).toBe(true);
+    expect(r.delivered).toBe(false);
+    expect(r.deliveredAt).toBeNull();
+  });
+
+  it('"Item Delivered" and a "delivered" status are', async () => {
+    const article: any = {
+      booking_details: {
+        article_number: 'CA182468665IN',
+        booked_on: '2026-10-10T05:00:00Z',
+      },
+      tracking_details: [
+        {
+          date: '2026-10-12T05:00:00Z',
+          event: 'Item Delivered',
+          office: 'Koramangala SO',
+        },
+      ],
+      del_status: { del_status: 'delivered' },
+    };
+    const { service } = makeService([article]);
+    expect((await service.track('CA182468665IN')).delivered).toBe(true);
+  });
+});
+
+describe('TrackingService — review fixes', () => {
+  it('a returned parcel is never "delivered" (delivery back to sender)', async () => {
+    const article: any = {
+      booking_details: {
+        article_number: 'CA182468665IN',
+        booked_on: '2026-10-10T05:00:00Z',
+      },
+      tracking_details: [
+        {
+          date: '2026-10-11T00:00:00Z',
+          time: '10:00:00',
+          event: 'Item Returned',
+          office: 'X',
+        },
+        {
+          date: '2026-10-13T00:00:00Z',
+          time: '11:00:00',
+          event: 'Item Delivered',
+          office: 'Our office',
+        },
+      ],
+      del_status: { del_status: 'delivered' },
+    };
+    const { service } = makeService([article]);
+    const r = await service.track('CA182468665IN');
+    expect(r.returnToSender).toBe(true);
+    expect(r.delivered).toBe(false);
+    expect(r.deliveredAt).toBeNull();
+  });
+
+  it('when the API fails, articles without stored scans are "unavailable", not "not found"', async () => {
+    const { service, api } = makeService([], {
+      pushed: [
+        {
+          articleNumber: 'CA100000001IN',
+          eventCode: '',
+          description: 'Item Booked',
+          eventAt: new Date(),
+          office: '',
+          officeId: '',
+          raw: {},
+        },
+      ],
+    });
+    api.trackBulk.mockRejectedValue(new Error('India Post down'));
+    const [known, other] = await service.trackMany([
+      'CA100000001IN',
+      'CA100000002IN',
+    ]);
+    expect(known.found).toBe(true);
+    expect(other).toMatchObject({ available: false, found: false });
+    expect(other.message).toContain('India Post down');
+  });
+
+  it('reads scan times as IST even when the value says Z', async () => {
+    const article: any = {
+      booking_details: {
+        article_number: 'CA182468665IN',
+        booked_on: '2026-10-10T05:00:00Z',
+      },
+      tracking_details: [
+        {
+          date: '2026-10-11T00:00:00Z',
+          time: '19:30:00',
+          event: 'Item Booked',
+          office: 'X',
+        },
+      ],
+    };
+    const { service } = makeService([article]);
+    expect((await service.track('CA182468665IN')).events[0].timestamp).toBe(
+      '2026-10-11T14:00:00.000Z',
+    );
   });
 });

@@ -181,10 +181,12 @@ export class TrackingService {
       this.logger.warn(
         `India Post tracking API failed (${(err as Error).message}); answering from webhook events`,
       );
+      // Articles with no stored scans weren't checked at all — say so rather
+      // than reporting them as unknown to India Post.
       return numbers.map((n) =>
         pushed.has(n)
           ? this.fromWebhook(n, pushed.get(n)!)
-          : this.map(n, undefined),
+          : this.unavailable(n, (err as Error).message),
       );
     }
 
@@ -250,13 +252,15 @@ export class TrackingService {
       partial: false,
       currentStatus: last?.event || 'Booked',
       currentStatusType: last?.eventType || 'Booked',
-      delivered: Boolean(deliveredRow),
+      // Returned beats delivered (delivery back to us).
+      delivered: Boolean(deliveredRow) && !events.some((e) => e.rts),
       bookedAt: booked
         ? new Date(booked.eventAt).toISOString()
         : events[0]?.timestamp || null,
-      deliveredAt: deliveredRow
-        ? new Date(deliveredRow.eventAt).toISOString()
-        : null,
+      deliveredAt:
+        deliveredRow && !events.some((e) => e.rts)
+          ? new Date(deliveredRow.eventAt).toISOString()
+          : null,
       lastUpdatedAt: last?.timestamp || null,
       events,
       articleType: this.str(raw.article_type as string),
@@ -327,16 +331,22 @@ export class TrackingService {
     const last = events[events.length - 1];
     const first = events[0];
 
-    // "not delivered" contains the word, so a plain /deliver/ test isn't enough.
+    // "not delivered" / "Item not Delivered" contain the word, so a plain
+    // /deliver/ test reads them backwards — use the shared milestone rules.
     const delStatus = (article?.del_status?.del_status || '').trim();
-    const deliveredByStatus =
-      /deliver/i.test(delStatus) && !/^not\b/i.test(delStatus);
+    const deliveredByStatus = milestoneOf('', delStatus) === 'DELIVERED';
     const deliveredEvent = [...events]
       .reverse()
-      .find((e) => /delivered/i.test(e.event));
-    const delivered = Boolean(
-      deliveredByStatus || booking?.delivery_confirmed_on || deliveredEvent,
+      .find((e) => milestoneOf('', e.event) === 'DELIVERED');
+    // A returned parcel's "delivered" is delivery back to us, never to the customer.
+    const returnToSender = events.some(
+      (e) => e.rts || milestoneOf('', e.event) === 'RETURNED',
     );
+    const delivered =
+      !returnToSender &&
+      Boolean(
+        deliveredByStatus || booking?.delivery_confirmed_on || deliveredEvent,
+      );
 
     const currentStatus = last?.event || 'Booked — awaiting first scan';
 
@@ -352,8 +362,9 @@ export class TrackingService {
       currentStatusType: last?.eventType || 'Booked',
       delivered,
       bookedAt: booking?.booked_on || first?.timestamp || null,
-      deliveredAt:
-        booking?.delivery_confirmed_on || deliveredEvent?.timestamp || null,
+      deliveredAt: delivered
+        ? booking?.delivery_confirmed_on || deliveredEvent?.timestamp || null
+        : null,
       lastUpdatedAt: last?.timestamp || booking?.booked_on || null,
       events,
       articleType: booking?.article_type || undefined,
@@ -366,7 +377,17 @@ export class TrackingService {
         typeof booking?.tariff === 'number' && booking.tariff > 0
           ? booking.tariff
           : undefined,
-      returnToSender: events.some((e) => e.rts),
+      returnToSender,
+    };
+  }
+
+  /** An article that couldn't be checked (the API failed): not "unknown". */
+  private unavailable(number: string, reason: string): TrackingResult {
+    return {
+      ...this.map(number, undefined),
+      available: false,
+      message: `Couldn't reach India Post tracking: ${reason}`,
+      currentStatus: 'Tracking unavailable',
     };
   }
 
@@ -400,12 +421,21 @@ export class TrackingService {
    * are left alone.
    */
   private timestamp(e: IndiaPostTrackingEvent): string {
+    // India Post's clock is IST even where the value says "Z" (their own
+    // booked_on carries +05:30 for the same instant). Rebuild the instant from
+    // the calendar date + the separate `time` (or the date's own clock) as IST.
     const date = (e.date || '').trim();
     const time = (e.time || '').trim();
-    if (!date || !time) return date;
-    return /T00:00:00(\.0+)?(Z|[+-]\d{2}:?\d{2})?$/.test(date)
-      ? date.replace(/T00:00:00(\.0+)?/, `T${time}`)
-      : date;
+    const day = /^(\d{4}-\d{2}-\d{2})/.exec(date)?.[1];
+    if (!day) return date;
+    const clock =
+      /^(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(time) ||
+      /T(\d{2}):(\d{2})(?::(\d{2}))?/.exec(date);
+    const hms = clock
+      ? `${clock[1].padStart(2, '0')}:${clock[2]}:${clock[3] ?? '00'}`
+      : '00:00:00';
+    const at = new Date(`${day}T${hms}+05:30`);
+    return Number.isNaN(at.getTime()) ? date : at.toISOString();
   }
 
   /** "Item Kept on Hold" → "ItemKeptOnHold", for callers matching on a code. */

@@ -42,6 +42,7 @@ function setup() {
   orderModel.findById = jest.fn();
   orderModel.find = jest.fn();
   orderModel.exists = jest.fn();
+  orderModel.countDocuments = jest.fn(() => query(1));
   orderModel.updateOne = jest.fn(() => query({}));
   orderModel.deleteOne = jest.fn(() => query({}));
 
@@ -530,6 +531,27 @@ describe('OrdersService.markReturned', () => {
     expect(filter.status).toEqual({
       $in: [OrderStatus.DISPATCHED, OrderStatus.DELIVERED],
     });
+  });
+});
+
+describe('OrdersService.markReturned — tracking number matching', () => {
+  it('matches the number in any case / padding', async () => {
+    const { service, orderModel } = setup();
+    orderModel.findOneAndUpdate.mockReturnValue(query(null));
+    orderModel.findOne.mockReturnValue(query({ status: OrderStatus.RETURNED }));
+    await service.markReturned(' ew123456789in ').catch(() => undefined);
+    const [filter] = orderModel.findOneAndUpdate.mock.calls[0];
+    expect(filter.trackingNumber.test('EW123456789IN')).toBe(true);
+    expect(filter.trackingNumber.test('Ew123456789IN ')).toBe(true);
+  });
+
+  it('refuses a number that is on several orders', async () => {
+    const { service, orderModel } = setup();
+    orderModel.countDocuments.mockReturnValue(query(2));
+    await expect(service.markReturned('EW123456789IN')).rejects.toThrow(
+      'is on 2 orders',
+    );
+    expect(orderModel.findOneAndUpdate).not.toHaveBeenCalled();
   });
 });
 
