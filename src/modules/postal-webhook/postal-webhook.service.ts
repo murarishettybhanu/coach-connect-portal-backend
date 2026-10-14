@@ -3,7 +3,6 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { timingSafeEqual } from 'crypto';
 import { ApprovalStatus, Order, OrderStatus } from '../../schemas/order.schema';
-import { PostalEvent } from '../../schemas/postal-event.schema';
 import { PostalWebhookLog } from '../../schemas/postal-webhook-log.schema';
 import { OrdersService } from '../orders/orders.service';
 import {
@@ -16,8 +15,9 @@ import {
 
 /**
  * India Post's webhook (Customer Integrations §13.8): they push each scan of
- * our articles to us. Every event is stored (PostalEvent); for the one order
- * carrying the article it then:
+ * our articles to us. Scans aren't stored one by one — the full history is
+ * fetched live from the tracking API when someone asks. For the one order
+ * carrying the article it:
  *   - keeps `order.lastPostalEvent` current,
  *   - Item Booked    → New / Ready to Ship becomes Dispatched,
  *   - Item Delivered → New / Ready to Ship / Dispatched becomes Delivered,
@@ -26,16 +26,14 @@ import {
  * the customer's WhatsApp updates are the same as a manual move.
  *
  * Never throws for a bad event: India Post retries failed deliveries, and one
- * odd scan must not block the rest. Repeats of a scan are stored once and do
- * nothing the second time.
+ * odd scan must not block the rest. A repeated scan is harmless: the latest
+ * scan only moves forward and every status move is guarded by the current status.
  */
 @Injectable()
 export class PostalWebhookService {
   private readonly logger = new Logger(PostalWebhookService.name);
 
   constructor(
-    @InjectModel(PostalEvent.name)
-    private readonly eventModel: Model<PostalEvent>,
     @InjectModel(Order.name) private readonly orderModel: Model<Order>,
     private readonly orders: OrdersService,
     @InjectModel(PostalWebhookLog.name)
@@ -53,10 +51,10 @@ export class PostalWebhookService {
 
   async ingest(body: unknown, channel: 'BOOKING' | 'OTHER') {
     const events = parsePostalPayload(body);
-    let stored = 0;
+    let stored = 0; // events that reached an order
     for (const e of events) {
       try {
-        if (await this.handle(e, channel)) stored++;
+        if (await this.handle(e)) stored++;
       } catch (err) {
         this.logger.error(
           `India Post event ${e.articleNumber} ${e.eventCode || e.description} failed: ${(err as Error).message}`,
@@ -65,17 +63,14 @@ export class PostalWebhookService {
     }
     if (events.length) {
       this.logger.log(
-        `India Post webhook (${channel}): ${events.length} received, ${stored} new`,
+        `India Post webhook (${channel}): ${events.length} received, ${stored} matched an order`,
       );
     }
     return { received: events.length, stored };
   }
 
-  /** Stores one event and applies it. Returns false for a repeat. */
-  private async handle(
-    e: ParsedPostalEvent,
-    channel: 'BOOKING' | 'OTHER',
-  ): Promise<boolean> {
+  /** Applies one event to its order. Returns false when no single order carries the article. */
+  private async handle(e: ParsedPostalEvent): Promise<boolean> {
     const matches: any[] = await this.orderModel
       .find({
         isDeleted: { $ne: true },
@@ -87,27 +82,9 @@ export class PostalWebhookService {
       )
       .lean()
       .exec();
-    // Several orders on one number is a data problem; record, but touch none.
-    const order = matches.length === 1 ? matches[0] : null;
-
-    // The unique index is the real guard; this also covers the moment before
-    // it exists (a fresh collection) and saves a write for the common repeat.
-    const seen = await this.eventModel
-      .exists({
-        articleNumber: e.articleNumber,
-        eventCode: e.eventCode,
-        eventAt: e.eventAt,
-        officeId: e.officeId,
-      } as any)
-      .exec();
-    if (seen) return false;
-    try {
-      await this.eventModel.create({ ...e, channel, orderId: order?._id });
-    } catch (err: any) {
-      if (err?.code === 11000) return false; // already have this scan
-      throw err;
-    }
-    if (!order) return true;
+    // Several orders on one number is a data problem; touch none.
+    if (matches.length !== 1) return false;
+    const order = matches[0];
 
     // Latest scan on the order — only ever forward, since events can arrive out of order.
     await this.recordLatestScan(order._id, {
@@ -121,7 +98,7 @@ export class PostalWebhookService {
       await this.apply(order, e);
     } catch (err) {
       // The order changed under us (a concurrent scan or sync): re-read it and
-      // try once more — a retry from India Post would be deduped and lost.
+      // try once more rather than lose the event.
       if (err instanceof ConflictException) {
         try {
           const fresh = await this.orderModel
@@ -137,7 +114,7 @@ export class PostalWebhookService {
           err = retryErr;
         }
       }
-      // The scan is stored; only the order update failed.
+      // The latest scan is recorded; only the status update failed.
       this.logger.error(
         `India Post ${e.articleNumber}: couldn't update order ${String(order._id)}: ${(err as Error).message}`,
       );
@@ -149,29 +126,12 @@ export class PostalWebhookService {
   private async apply(order: any, e: ParsedPostalEvent): Promise<void> {
     // Any real movement scan (bagged, received …) means it was booked, even
     // if the Item Booked event itself never reached us.
-    let milestone =
+    const milestone =
       milestoneOf(e.eventCode, e.description, e.nonDeliveryReason) ??
       (isMovementScan(e.eventCode, e.description) ? 'BOOKED' : null);
-    // A "delivered" after the parcel was returned is delivery back to us.
-    if (
-      milestone === 'DELIVERED' &&
-      (await this.wasReturned(e.articleNumber))
-    ) {
-      milestone = 'RETURNED';
-    }
+    // A "delivered" after a reported return is delivery back to us —
+    // applyMilestone checks `postalReturnReportedAt`.
     await this.applyMilestone(order, milestone, e.eventAt, e.articleNumber);
-  }
-
-  /** Whether any stored scan of this article is a return. */
-  private async wasReturned(articleNumber: string): Promise<boolean> {
-    const rows: any[] = await this.eventModel
-      .find({ articleNumber } as any)
-      .select('eventCode description')
-      .lean()
-      .exec();
-    return rows.some(
-      (r) => milestoneOf(r.eventCode, r.description) === 'RETURNED',
-    );
   }
 
   /**
@@ -270,37 +230,6 @@ export class PostalWebhookService {
   }
 
   /**
-   * Stores a scan learned some other way (the tracking API) in `postalevents`,
-   * so Track Order's history and the webhook share one record. Repeats skip.
-   */
-  async storeScan(
-    e: Omit<ParsedPostalEvent, 'raw'> & { raw?: Record<string, unknown> },
-    orderId?: unknown,
-  ) {
-    const seen = await this.eventModel
-      .exists({
-        articleNumber: e.articleNumber,
-        eventCode: e.eventCode,
-        eventAt: e.eventAt,
-        officeId: e.officeId,
-      } as any)
-      .exec();
-    if (seen) return false;
-    try {
-      await this.eventModel.create({
-        ...e,
-        raw: e.raw ?? {},
-        channel: 'SYNC',
-        orderId: orderId as any,
-      });
-      return true;
-    } catch (err: any) {
-      if (err?.code === 11000) return false;
-      throw err;
-    }
-  }
-
-  /**
    * One row per webhook delivery (kept 30 days): what arrived and what we made
    * of it, including bodies we couldn't read — so a format surprise from India
    * Post is visible instead of silently dropped.
@@ -329,23 +258,5 @@ export class PostalWebhookService {
         `India Post webhook (${entry.channel}): a delivery with no readable events (${entry.contentType || 'no content type'}, ${entry.bytes} bytes) — see postalwebhooklogs`,
       );
     }
-  }
-
-  /** Stored scans for these articles, oldest first, keyed by article number. */
-  async eventsFor(
-    articleNumbers: string[],
-  ): Promise<Map<string, PostalEvent[]>> {
-    const rows = await this.eventModel
-      .find({ articleNumber: { $in: articleNumbers } } as any)
-      .sort({ eventAt: 1 })
-      .lean()
-      .exec();
-    const out = new Map<string, PostalEvent[]>();
-    for (const r of rows as any[]) {
-      const list = out.get(r.articleNumber) ?? [];
-      list.push(r);
-      out.set(r.articleNumber, list);
-    }
-    return out;
   }
 }

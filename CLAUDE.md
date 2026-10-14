@@ -180,15 +180,16 @@ article number (e.g. the portal's Test ping) are ignored. Pure parsing / classif
 Returned are matched on code **and** description (only ITEM_BOOK is documented), and "not
 delivered" / non-delivery / attempted / out-for-delivery never count as delivered.
 
-`PostalWebhookService` stores each scan in **`postalevents`** (unique per article + code + time +
-office; repeats are skipped) and, for the **one** non-deleted order with that tracking number:
-keeps `order.lastPostalEvent` (forward-only); **Item Booked** moves New / Ready to Ship →
-Dispatched; **Item Delivered** moves New / Ready to Ship / Dispatched → Delivered
-(`updateStatus(..., { skipDispatch: true })`, so the usual WhatsApp updates go out); **Item
-Returned** only sets `postalReturnReportedAt` — logging the return stays manual. Pending-approval,
-delivered, returned and cancelled orders are never moved; a number on several orders is recorded
-but touches none. `TrackingService` answers from these events when the tracking API refuses us
-or doesn't know an article (`source: 'India Post (webhook)'`).
+**Only the latest scan is stored** (decision, 2026-10-15): `order.lastPostalEvent` (forward-only). Scan
+history is never stored — it is read live from the tracking API when someone asks (Track Order, or
+"Tracking history" in the order details popup). The old `postalevents` collection is no longer written or read.
+For the **one** non-deleted order with that tracking number, `PostalWebhookService` keeps `lastPostalEvent`;
+**Item Booked** moves New / Ready to Ship → Dispatched; **Item Delivered** moves New / Ready to Ship /
+Dispatched → Delivered (`updateStatus(..., { skipDispatch: true })`, so the usual WhatsApp updates go out);
+**Item Returned** only sets `postalReturnReportedAt` — logging the return stays manual. Pending-approval,
+delivered, returned and cancelled orders are never moved; a number on several orders (or none) is ignored.
+Repeated scans are harmless (status-guarded moves, forward-only latest scan). If the tracking API fails,
+tracking fails — there is no fallback from our own records.
 
 **Robustness:**
 - `postalBodyParser` (`postal-body.ts`, mounted in `app.setup.ts` before Nest's JSON parser) reads the webhook body as JSON **whatever its Content-Type** (JSON, text/plain, a form field holding JSON), up to **5 MB**.
@@ -201,13 +202,13 @@ or doesn't know an article (`source: 'India Post (webhook)'`).
   - **returned** (return to sender, or an "Item Returned" scan): flag only. This wins over delivered, since a delivery after a return is a delivery back to us.
   - **delivered** → Delivered.
   - **known to India Post** while Ready to Ship → Dispatched.
-- It records each order's latest scan and stores the scans in `postalevents` (channel `SYNC`).
+- It records each order's latest scan (`lastPostalEvent`); the scans themselves aren't stored.
 - It returns counts and the list of changes.
 
 **Classification rules** (`postal-event-rules.ts`, reviewed 2026-10-14; keep them strict):
 - **RETURNED** is checked first: Return… / RTS / "to sender" / "sent back". So "Delivered to sender" is a **return**.
 - **DELIVERED** needs the word *Delivered*, or the bare code ITEM_DELIVERY / DELIVERED. It must have no not / non / un- / failed / unsuccessful / attempted / intimation, and no `non_delivery_reason`. "Delivery Office" and "Out for delivery" are movement, not delivery.
-- **Return wins:** once an order has `postalReturnReportedAt`, or the article has a stored return scan, a later "Delivered" never delivers it.
+- **Return wins:** once an order has `postalReturnReportedAt`, a later "Delivered" never delivers it (the sync also checks the whole live history for a return).
 - **Dispatched** comes from `isMovementScan`: booked / bagged / received / dispatched / on hold / not delivered / intimation… but **never** pickup request / pre-advice / manifest / label.
 - **Times:** India Post's clock is IST even where the value says "Z". Tracking-API scans are rebuilt as `date + time` at +05:30. Webhook times are `event_date + event_time` at IST (H:MM ok; a missing date means today's IST date).
 - **Sync specifics:** a **preview** (`dryRun`) reports without writing or messaging. Numbers on several orders are skipped (`sharedNumber`). Articles the API couldn't check count as `failed`, not "not found".
@@ -788,6 +789,18 @@ Full plan: `../plans/customer-addresses-and-two-step-checkout.md`. In short:
 - **A public saved-addresses endpoint**, gated by the WhatsApp OTP proof.
 - **Storefront orders** will then require the OTP too, with Landmark and Sector/Village required as on campaigns.
 - **Backfill:** a dry-run-first, idempotent script.
+
+### Remove the India Post webhook delivery logs (`postalwebhooklogs`), once webhooks are proven
+
+Kept for now (decision, 2026-10-15) as a debugging aid while India Post's webhook is new: every
+valid-token delivery is logged with its raw body (first 20 KB) and auto-deleted after 30 days.
+Remove it once real deliveries have been arriving reliably and orders are moving from them as expected:
+- Drop `PostalWebhookService.logDelivery` and its calls in `postal-webhook.controller.ts`; keep the
+  `logger.warn` for a delivery with no readable events, so format surprises still show in container logs.
+- Delete `src/schemas/postal-webhook-log.schema.ts` and its registration in `postal-webhook.module.ts`.
+- Update the tests and the "India Post webhook → Robustness" notes above.
+- Drop the collection in production (`db.postalwebhooklogs.drop()`), and the unused `postalevents` with it if
+  it's still there.
 
 ### WhatsApp alert to an admin number — new restock requests & website inquiries
 

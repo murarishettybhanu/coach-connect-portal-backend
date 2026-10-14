@@ -54,8 +54,8 @@ export type SyncSummary = {
  *                        delivery back to us, not to the customer)
  *   delivered          → Delivered
  *   known to India Post (booked / scanned) while Ready to Ship → Dispatched
- * Every order checked also gets its latest scan, and the scans are stored with
- * the webhook's (postalevents, channel SYNC).
+ * Every order checked also gets its latest scan (`lastPostalEvent`); the scan
+ * history itself isn't stored — it's fetched live when someone asks.
  */
 @Injectable()
 export class PostalSyncService {
@@ -189,25 +189,6 @@ export class PostalSyncService {
         continue;
       }
       try {
-        // Keep the scans with the webhook's (unless they came from there).
-        if (!dryRun && !r.source.includes('webhook')) {
-          for (const e of r.events) {
-            const at = new Date(e.timestamp);
-            if (Number.isNaN(at.getTime())) continue;
-            await this.webhook.storeScan(
-              {
-                articleNumber: number,
-                eventCode: '',
-                description: e.event,
-                eventAt: at,
-                office: e.office,
-                officeId: e.pincode,
-                nonDeliveryReason: e.remarks,
-              },
-              order._id,
-            );
-          }
-        }
         const last = r.events[r.events.length - 1];
         if (
           !dryRun &&

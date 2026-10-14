@@ -5,7 +5,6 @@ import { TrackingService } from './tracking.service';
 import { IndiaPostApiService } from './india-post-api.service';
 import { Order, OrderSchema } from '../../schemas/order.schema';
 import { Tribe, TribeSchema } from '../../schemas/tribe.schema';
-import { PostalEvent, PostalEventSchema } from '../../schemas/postal-event.schema';
 
 @Module({
   imports: [
@@ -13,8 +12,6 @@ import { PostalEvent, PostalEventSchema } from '../../schemas/postal-event.schem
     MongooseModule.forFeature([
       { name: Order.name, schema: OrderSchema },
       { name: Tribe.name, schema: TribeSchema },
-      // Scans India Post pushed to our webhook — the fallback when the API refuses us.
-      { name: PostalEvent.name, schema: PostalEventSchema },
     ]),
   ],
   controllers: [TrackingController],
