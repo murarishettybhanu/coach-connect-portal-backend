@@ -1,3 +1,4 @@
+import { buildTemplateComponents, renderTemplateBody } from './template-fields';
 import {
   Injectable,
   Logger,
@@ -24,8 +25,16 @@ import {
   type SendTemplateInput,
   type WhatsappTemplate,
 } from './whatsapp-api.service';
-import { checkOutboundMedia, mediaPreview, MAX_CAPTION } from './outbound-media';
-import { previewText, toInteractive, type QuickPayload } from './quick-messages';
+import {
+  checkOutboundMedia,
+  mediaPreview,
+  MAX_CAPTION,
+} from './outbound-media';
+import {
+  previewText,
+  toInteractive,
+  type QuickPayload,
+} from './quick-messages';
 
 // Shape of the pieces of Meta's webhook payload we read. Everything is
 // optional because Meta adds fields (and whole `field` types) over time and a
@@ -380,9 +389,7 @@ export class WhatsappService {
   }
 
   /** A conversation as the inbox shows it: plus whether the reply window is open. */
-  presentConversation(
-    c: any,
-  ): Record<string, unknown> & {
+  presentConversation(c: any): Record<string, unknown> & {
     windowOpen: boolean;
     windowExpiresAt: Date | null;
   } {
@@ -462,7 +469,11 @@ export class WhatsappService {
         ? await this.api.sendInteractive(contact, interactive)
         : await this.api.sendText(contact, payload.body);
       const [saved] = await Promise.all([
-        this.messageModel.create({ ...base, waMessageId, sendStatus: WhatsappSendStatus.SENT }),
+        this.messageModel.create({
+          ...base,
+          waMessageId,
+          sendStatus: WhatsappSendStatus.SENT,
+        }),
         this.conversationModel.updateOne(
           { contact },
           {
@@ -489,10 +500,10 @@ export class WhatsappService {
   /** Chats with unread messages, and how many unread messages in total. */
   async unreadSummary(): Promise<{ chats: number; messages: number }> {
     const [row] = await this.conversationModel
-      .aggregate<{ chats: number; messages: number }>([
-        { $match: { unreadCount: { $gt: 0 } } },
-        { $group: { _id: null, chats: { $sum: 1 }, messages: { $sum: '$unreadCount' } } },
-      ])
+      .aggregate<{
+        chats: number;
+        messages: number;
+      }>([{ $match: { unreadCount: { $gt: 0 } } }, { $group: { _id: null, chats: { $sum: 1 }, messages: { $sum: '$unreadCount' } } }])
       .exec();
     return { chats: row?.chats ?? 0, messages: row?.messages ?? 0 };
   }
@@ -504,7 +515,12 @@ export class WhatsappService {
    */
   async replyWithMedia(
     contact: string,
-    file: { buffer: Buffer; mimetype?: string; originalname?: string; size: number },
+    file: {
+      buffer: Buffer;
+      mimetype?: string;
+      originalname?: string;
+      size: number;
+    },
     caption?: string,
   ): Promise<WhatsappMessage> {
     const conversation = await this.conversationModel.findOne({ contact });
@@ -530,7 +546,8 @@ export class WhatsappService {
       to: contact,
       type: check.kind,
       // Shown under the attachment; documents fall back to their name.
-      text: sentCaption ?? (check.kind === 'document' ? check.filename : undefined),
+      text:
+        sentCaption ?? (check.kind === 'document' ? check.filename : undefined),
       mimeType: check.mimeType,
       raw: { filename: check.filename, size: file.size },
       sentAt: now,
@@ -539,11 +556,20 @@ export class WhatsappService {
     };
     let mediaId: string | undefined;
     try {
-      mediaId = await this.api.uploadMedia(file.buffer, check.mimeType, check.filename);
-      const { waMessageId } = await this.api.sendMedia(contact, check.kind, mediaId, {
-        caption: sentCaption,
-        filename: check.filename,
-      });
+      mediaId = await this.api.uploadMedia(
+        file.buffer,
+        check.mimeType,
+        check.filename,
+      );
+      const { waMessageId } = await this.api.sendMedia(
+        contact,
+        check.kind,
+        mediaId,
+        {
+          caption: sentCaption,
+          filename: check.filename,
+        },
+      );
       const [saved] = await Promise.all([
         this.messageModel.create({
           ...base,
@@ -556,7 +582,11 @@ export class WhatsappService {
           {
             $set: {
               lastOutboundAt: now,
-              lastMessagePreview: mediaPreview(check.kind, check.filename, sentCaption),
+              lastMessagePreview: mediaPreview(
+                check.kind,
+                check.filename,
+                sentCaption,
+              ),
               lastMessageDirection: WhatsappDirection.OUTBOUND,
             },
           },
@@ -622,11 +652,21 @@ export class WhatsappService {
     const template = opts.template ?? (await this.findTemplate(input));
     const authentication =
       input.authentication ?? template?.category === 'AUTHENTICATION';
-    const rendered = this.renderTemplate(input, template, authentication);
+    // Values keyed by field (the admin dialog): the payload is built from the
+    // template's own fields, so named placeholders, header text/media and
+    // dynamic buttons all go out in the shape Meta expects.
+    const prepared = input.values
+      ? this.fromFieldValues(input, template)
+      : input;
+    const rendered =
+      input.values && template && !authentication
+        ? (renderTemplateBody(template, input.values) ??
+          `[template: ${input.name}]`)
+        : this.renderTemplate(input, template, authentication);
 
     try {
       const { waMessageId } = await this.api.sendTemplate(contact, {
-        ...input,
+        ...prepared,
         authentication,
       });
 
@@ -675,6 +715,34 @@ export class WhatsappService {
         handled: true,
       });
       throw err;
+    }
+  }
+
+  /** A send described by field values → one with prebuilt components (400 on anything missing). */
+  private fromFieldValues(
+    input: SendTemplateInput,
+    template?: WhatsappTemplate,
+  ): SendTemplateInput {
+    if (!template) {
+      throw new BadRequestException(
+        `Couldn't load template "${input.name}" (${input.language}) from Meta — try again in a moment`,
+      );
+    }
+    const values = input.values ?? {};
+    const bad = Object.entries(values).find(
+      ([k, v]) =>
+        !/^(header|body|button)\.[\w]{1,60}$/.test(k) || typeof v !== 'string',
+    );
+    if (bad)
+      throw new BadRequestException(`Invalid template value "${bad[0]}"`);
+    try {
+      return {
+        name: input.name,
+        language: input.language,
+        components: buildTemplateComponents(template, values),
+      };
+    } catch (err) {
+      throw new BadRequestException((err as Error).message);
     }
   }
 

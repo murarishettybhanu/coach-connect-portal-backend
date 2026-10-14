@@ -637,7 +637,10 @@ fields, messages fixed — change both sides together). No permission switch.
   always acks 200). Admin-only: `GET /whatsapp/conversations`,
   `GET /whatsapp/conversations/:contact`, `POST /whatsapp/conversations/:contact/reply`,
   `PATCH /whatsapp/conversations/:contact/read`, `GET /whatsapp/messages?from=&limit=`,
-  `POST /whatsapp/conversations/:contact/template`,
+  `POST /whatsapp/conversations/:contact/template` (`{ name, language, values }` — `values` keyed by field:
+  `header.<name>`, `header.media` (https link), `body.<name>` (numbered or named), `button.<i>` (dynamic URL
+  suffix / coupon code). `template-fields.ts` (tested) reads the template's own fields from Meta and builds the
+  components, 400 naming anything missing; the frontend mirrors `templateFields`. Old `parameters` still works),
   `GET /whatsapp/conversations/:contact/quick-messages?tribeId=` + `POST .../quick-messages/:id`
   (quick messages — `quick-messages.ts` catalogue: Service / Orders / Feedback / Explore / Tribe, rendered
   server-side by `QuickMessagesService` with the chat's tribe (owner or member phone; pick one when several)

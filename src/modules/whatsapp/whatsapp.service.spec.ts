@@ -203,6 +203,87 @@ describe('WhatsappService', () => {
   });
 
   describe('sendTemplateTo', () => {
+    describe('with field values (admin dialog)', () => {
+      const namedTemplate = {
+        id: '9',
+        name: 'delivery_message',
+        language: 'en',
+        category: 'UTILITY',
+        status: 'APPROVED',
+        components: [
+          { type: 'HEADER', format: 'IMAGE' },
+          {
+            type: 'BODY',
+            text: 'Hello {{customer_name}}, your {{kit_name}} arrived.',
+          },
+        ],
+      };
+
+      it('builds components from the template and renders the body for the thread', async () => {
+        listTemplates.mockResolvedValueOnce([namedTemplate]);
+        await service.sendTemplateTo('919876543210', {
+          name: 'delivery_message',
+          language: 'en',
+          values: {
+            'header.media': 'https://cdn.example.com/a.jpg',
+            'body.customer_name': 'Asha',
+            'body.kit_name': 'Diamond Kit',
+          },
+        });
+        const [, input] = sendTemplate.mock.calls[0] as [
+          string,
+          { components?: unknown[] },
+        ];
+        expect(input.components).toEqual([
+          {
+            type: 'header',
+            parameters: [
+              {
+                type: 'image',
+                image: { link: 'https://cdn.example.com/a.jpg' },
+              },
+            ],
+          },
+          {
+            type: 'body',
+            parameters: [
+              { type: 'text', parameter_name: 'customer_name', text: 'Asha' },
+              { type: 'text', parameter_name: 'kit_name', text: 'Diamond Kit' },
+            ],
+          },
+        ]);
+        const created = (create.mock.calls[0] as [Record<string, unknown>])[0];
+        expect(created.text).toBe('Hello Asha, your Diamond Kit arrived.');
+      });
+
+      it('400s naming the missing value, without calling Meta', async () => {
+        listTemplates.mockResolvedValueOnce([namedTemplate]);
+        await expect(
+          service.sendTemplateTo('919876543210', {
+            name: 'delivery_message',
+            language: 'en',
+            values: {
+              'header.media': 'https://cdn.example.com/a.jpg',
+              'body.customer_name': 'Asha',
+            },
+          }),
+        ).rejects.toThrow('Body {{kit_name}} is required');
+        expect(sendTemplate).not.toHaveBeenCalled();
+      });
+
+      it('400s when the template could not be loaded', async () => {
+        listTemplates.mockRejectedValueOnce(new Error('graph down'));
+        await expect(
+          service.sendTemplateTo('919876543210', {
+            name: 'nope',
+            language: 'en',
+            values: {},
+          }),
+        ).rejects.toThrow("Couldn't load template");
+        expect(sendTemplate).not.toHaveBeenCalled();
+      });
+    });
+
     it('records the rendered body so the thread reads like a conversation', async () => {
       await service.sendTemplateTo('9876543210', {
         name: 'order_dispatched',

@@ -76,6 +76,15 @@ export interface SendTemplateInput {
    * since the copy-code button has nothing to copy.
    */
   authentication?: boolean;
+
+  /**
+   * Prebuilt `components` (from `buildTemplateComponents`, which reads the
+   * template's own fields). When set, every other value field above is ignored.
+   */
+  components?: Record<string, unknown>[];
+
+  /** Admin dialog values keyed by field (`body.customer_name`, `header.media` …) — see template-fields.ts. */
+  values?: Record<string, string>;
 }
 
 export interface MediaFile {
@@ -254,17 +263,28 @@ export class WhatsappApiService {
    * Interactive message (reply buttons, CTA URL or list). Free-form, so only
    * inside the 24-hour window — callers check it.
    */
-  async sendInteractive(to: string, interactive: Record<string, unknown>): Promise<SendTextResult> {
+  async sendInteractive(
+    to: string,
+    interactive: Record<string, unknown>,
+  ): Promise<SendTextResult> {
     const data = await this.request<{ messages?: Array<{ id?: string }> }>(
       `${this.phoneNumberId}/messages`,
       {
         method: 'POST',
-        body: { messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'interactive', interactive },
+        body: {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to,
+          type: 'interactive',
+          interactive,
+        },
       },
     );
     const waMessageId = data.messages?.[0]?.id;
     if (!waMessageId) {
-      throw new BadGatewayException('WhatsApp accepted the send but returned no message id');
+      throw new BadGatewayException(
+        'WhatsApp accepted the send but returned no message id',
+      );
     }
     return { waMessageId };
   }
@@ -273,11 +293,19 @@ export class WhatsappApiService {
    * Uploads a file to Meta for this number and returns its media id. Media
    * uploaded this way can be sent (and downloaded again) for 30 days.
    */
-  async uploadMedia(buffer: Buffer, mimeType: string, filename: string): Promise<string> {
+  async uploadMedia(
+    buffer: Buffer,
+    mimeType: string,
+    filename: string,
+  ): Promise<string> {
     const form = new FormData();
     form.append('messaging_product', 'whatsapp');
     form.append('type', mimeType);
-    form.append('file', new Blob([new Uint8Array(buffer)], { type: mimeType }), filename);
+    form.append(
+      'file',
+      new Blob([new Uint8Array(buffer)], { type: mimeType }),
+      filename,
+    );
 
     const path = `${this.phoneNumberId}/media`;
     let res: Response;
@@ -305,9 +333,16 @@ export class WhatsappApiService {
     }
     if (!res.ok || !parsed.id) {
       const detail =
-        parsed.error?.error_user_msg || parsed.error?.message || text.slice(0, 300) || `HTTP ${res.status}`;
+        parsed.error?.error_user_msg ||
+        parsed.error?.message ||
+        text.slice(0, 300) ||
+        `HTTP ${res.status}`;
       this.logger.error(`Graph API ${path} → ${res.status}: ${detail}`);
-      throw upstreamError(res.ok ? 502 : res.status, detail, parsed.error?.code);
+      throw upstreamError(
+        res.ok ? 502 : res.status,
+        detail,
+        parsed.error?.code,
+      );
     }
     return parsed.id;
   }
@@ -329,12 +364,20 @@ export class WhatsappApiService {
       `${this.phoneNumberId}/messages`,
       {
         method: 'POST',
-        body: { messaging_product: 'whatsapp', recipient_type: 'individual', to, type: kind, [kind]: media },
+        body: {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to,
+          type: kind,
+          [kind]: media,
+        },
       },
     );
     const waMessageId = data.messages?.[0]?.id;
     if (!waMessageId) {
-      throw new BadGatewayException('WhatsApp accepted the send but returned no message id');
+      throw new BadGatewayException(
+        'WhatsApp accepted the send but returned no message id',
+      );
     }
     return { waMessageId };
   }
@@ -349,9 +392,13 @@ export class WhatsappApiService {
     input: SendTemplateInput,
   ): Promise<SendTextResult> {
     this.assertParameterNames(input);
-    const components: Record<string, unknown>[] = [];
+    const components: Record<string, unknown>[] = input.components
+      ? [...input.components]
+      : [];
 
-    if (input.headerImageUrl) {
+    if (input.components) {
+      // Already built from the template's fields.
+    } else if (input.headerImageUrl) {
       components.push({
         type: 'header',
         parameters: [{ type: 'image', image: { link: input.headerImageUrl } }],
@@ -545,7 +592,11 @@ export class WhatsappApiService {
    * GET with Meta's cursor paging followed (`paging.next`), concatenating
    * `pick(page)` from every page. Capped so a runaway cursor can't loop.
    */
-  private async getAllPages<T>(path: string, pick: (page: any) => T[], maxPages = 20): Promise<T[]> {
+  private async getAllPages<T>(
+    path: string,
+    pick: (page: any) => T[],
+    maxPages = 20,
+  ): Promise<T[]> {
     const out: T[] = [];
     let page: any = await this.request<any>(path, { method: 'GET' });
     for (let i = 0; page && i < maxPages; i++) {
@@ -553,7 +604,10 @@ export class WhatsappApiService {
       const next: string | undefined = page?.paging?.next;
       if (!next) break;
       // `next` is a full URL on graph.facebook.com — strip the host/version.
-      const rel = next.replace(/^https:\/\/graph\.facebook\.com\/v[\d.]+\//, '');
+      const rel = next.replace(
+        /^https:\/\/graph\.facebook\.com\/v[\d.]+\//,
+        '',
+      );
       page = await this.request<any>(rel, { method: 'GET' });
     }
     return out;
@@ -566,18 +620,23 @@ export class WhatsappApiService {
    */
   async pricingAnalytics(start: number, end: number): Promise<PricingPoint[]> {
     const field = `pricing_analytics.start(${start}).end(${end}).granularity(DAILY).dimensions(["PRICING_CATEGORY"])`;
-    const data = await this.request<{ pricing_analytics?: { data?: { data_points?: PricingPoint[] }[] } }>(
-      `${this.wabaId}?fields=${encodeURIComponent(field)}`,
-      { method: 'GET' },
+    const data = await this.request<{
+      pricing_analytics?: { data?: { data_points?: PricingPoint[] }[] };
+    }>(`${this.wabaId}?fields=${encodeURIComponent(field)}`, { method: 'GET' });
+    return (data.pricing_analytics?.data ?? []).flatMap(
+      (d) => d.data_points ?? [],
     );
-    return (data.pricing_analytics?.data ?? []).flatMap((d) => d.data_points ?? []);
   }
 
   /**
    * Per-template daily analytics (sent, delivered, read, clicks, cost). Meta
    * takes at most 10 template ids per call and pages the result.
    */
-  async templateAnalytics(templateIds: string[], start: number, end: number): Promise<TemplatePoint[]> {
+  async templateAnalytics(
+    templateIds: string[],
+    start: number,
+    end: number,
+  ): Promise<TemplatePoint[]> {
     const out: TemplatePoint[] = [];
     for (let i = 0; i < templateIds.length; i += 10) {
       const q = new URLSearchParams({
@@ -585,11 +644,18 @@ export class WhatsappApiService {
         end: String(end),
         granularity: 'DAILY',
         template_ids: JSON.stringify(templateIds.slice(i, i + 10)),
-        metric_types: JSON.stringify(['COST', 'SENT', 'DELIVERED', 'READ', 'CLICKED']),
+        metric_types: JSON.stringify([
+          'COST',
+          'SENT',
+          'DELIVERED',
+          'READ',
+          'CLICKED',
+        ]),
       });
       out.push(
-        ...(await this.getAllPages<TemplatePoint>(`${this.wabaId}/template_analytics?${q}`, (page) =>
-          (page?.data ?? []).flatMap((d: any) => d.data_points ?? []),
+        ...(await this.getAllPages<TemplatePoint>(
+          `${this.wabaId}/template_analytics?${q}`,
+          (page) => (page?.data ?? []).flatMap((d: any) => d.data_points ?? []),
         )),
       );
     }
@@ -598,7 +664,10 @@ export class WhatsappApiService {
 
   /** The WABA's billing currency (e.g. INR). */
   async accountCurrency(): Promise<string> {
-    const data = await this.request<{ currency?: string }>(`${this.wabaId}?fields=currency`, { method: 'GET' });
+    const data = await this.request<{ currency?: string }>(
+      `${this.wabaId}?fields=currency`,
+      { method: 'GET' },
+    );
     return data.currency || 'INR';
   }
 

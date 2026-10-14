@@ -1,5 +1,6 @@
 import {
   IsArray,
+  IsObject,
   IsOptional,
   IsString,
   Matches,
@@ -21,4 +22,12 @@ export class SendTemplateDto {
   @IsString({ each: true })
   @MaxLength(1024, { each: true })
   parameters?: string[];
+
+  // Values keyed by field — `header.<name>`, `header.media`, `body.<name>`,
+  // `button.<index>` (template-fields.ts). Preferred over `parameters`: covers
+  // named placeholders, header text/media and dynamic buttons. Checked against
+  // the template itself in the service.
+  @IsOptional()
+  @IsObject()
+  values?: Record<string, string>;
 }
