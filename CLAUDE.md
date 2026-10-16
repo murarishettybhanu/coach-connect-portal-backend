@@ -593,6 +593,12 @@ fields, messages fixed — change both sides together). No permission switch.
   `PENDING` = approval pending, `NEW` excludes those; unknown values 400) via `applyStatusFilter`,
   admin lists `GET /paginated`, `/by-coach/:coachId`, `/returned`, `/rejected`, `/deleted` take
   `campaignId` (comma list; `none` = no campaign) via `andCampaignFilter` in `common/utils/coach-ids.util.ts`,
+  **advanced search** — `lookup` on `GET /paginated`, `/by-coach/:coachId`, `/duplicates`, `/returned`, `/rejected`,
+  `/deleted`: many values comma-joined (≤ 500), each classified by `order-lookup.ts` (tested + real-Mongo
+  `order-lookup.int.spec.ts`) as a phone (last 10 digits, matched however it was typed), tracking number (any case /
+  padding), order id (24 hex) or short id (the last 8 shown in tables), email or pincode; an order matching ANY value
+  is kept, ANDed with the other filters (only unrecognised values → no orders). Paginated responses add
+  `lookup: { values, unknown, unmatched }` — values no order matched across every page,
   `GET /duplicates` (admin; `coachId`, `campaignId`, `status` incl. `PENDING` = awaiting approval, `search`,
   `page`, `limit`): orders whose phone (last 10 chars) is on another non-rejected, non-deleted order of the same
   tribe; tribe/campaign set the scope, status/search only pick rows; grouped by number, newest group first;

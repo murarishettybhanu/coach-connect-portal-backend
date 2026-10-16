@@ -211,8 +211,9 @@ export class OrdersController {
   findDeleted(
     @Query('coachId') coachId?: string,
     @Query('campaignId') campaignId?: string,
+    @Query('lookup') lookup?: string,
   ) {
-    return this.ordersService.findDeleted(coachId, campaignId);
+    return this.ordersService.findDeleted(coachId, campaignId, lookup);
   }
 
   // Admin: log a parcel that came back, by the tracking number on the label.
@@ -233,6 +234,7 @@ export class OrdersController {
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('search') search?: string,
+    @Query('lookup') lookup?: string,
   ) {
     return this.ordersService.findReturned({
       coachId,
@@ -240,6 +242,7 @@ export class OrdersController {
       page: Number(page) || 1,
       limit: Number(limit) || 20,
       search,
+      lookup,
     });
   }
 
@@ -261,6 +264,7 @@ export class OrdersController {
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('search') search?: string,
+    @Query('lookup') lookup?: string,
   ) {
     return this.ordersService.findRejected({
       coachId,
@@ -268,6 +272,7 @@ export class OrdersController {
       page: Number(page) || 1,
       limit: Number(limit) || 20,
       search,
+      lookup,
     });
   }
 
@@ -307,6 +312,7 @@ export class OrdersController {
     @Query('status') status?: string,
     @Query('coachId') coachId?: string | string[],
     @Query('campaignId') campaignId?: string | string[],
+    @Query('lookup') lookup?: string,
   ) {
     return this.ordersService.withPriorClaimsPage(
       await this.ordersService.findDuplicates({
@@ -316,6 +322,7 @@ export class OrdersController {
         status,
         coachId,
         campaignId,
+        lookup,
       }),
     );
   }
@@ -330,6 +337,7 @@ export class OrdersController {
     @Query('status') status?: string,
     @Query('coachId') coachId?: string | string[],
     @Query('campaignId') campaignId?: string | string[],
+    @Query('lookup') lookup?: string,
   ) {
     return this.ordersService.withPriorClaimsPage(
       await this.ordersService.findAllPaginated({
@@ -339,6 +347,7 @@ export class OrdersController {
         status,
         coachId,
         campaignId,
+        lookup,
       }),
     );
   }
@@ -360,6 +369,7 @@ export class OrdersController {
     @Query('search') search?: string,
     @Query('status') status?: string,
     @Query('campaignId') campaignId?: string | string[],
+    @Query('lookup') lookup?: string,
   ) {
     return this.ordersService.withPriorClaimsPage(
       await this.ordersService.findByCoachPaginated(coachId, {
@@ -368,6 +378,7 @@ export class OrdersController {
         search,
         status,
         campaignId,
+        lookup,
       }),
     );
   }
