@@ -597,6 +597,10 @@ fields, messages fixed — change both sides together). No permission switch.
   `page`, `limit`): orders whose phone (last 10 chars) is on another non-rejected, non-deleted order of the same
   tribe; tribe/campaign set the scope, status/search only pick rows; grouped by number, newest group first;
   returns `groups` too (`findDuplicates`, real-Mongo test `orders-duplicates.int.spec.ts`),
+  `POST /postal-csv/lookup` (admin; `{ codes }`, same matching and cap as below; read-only): per code READY (Ready
+  to Ship) / NOT_PACKED / AWAITING_APPROVAL / ALREADY_DISPATCHED / CLOSED / MULTIPLE / NOT_FOUND, with the full order
+  populated like the pipeline's (tribe, products, campaign parcel spec) when exactly one carries it — the frontend's
+  Postal CSV tool builds the India Post booking file from it,
   `POST /deliver-by-tracking/preview` + `POST /deliver-by-tracking` (admin; `{ codes }`, up to 1000
   unique, case/space-insensitive; one row per code: READY (New / Ready to Ship / Dispatched) /
   ALREADY_DELIVERED / CLOSED (returned, cancelled) / AWAITING_APPROVAL / MULTIPLE / NOT_FOUND, then

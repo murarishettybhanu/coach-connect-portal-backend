@@ -68,7 +68,8 @@ export class OrdersController {
     }
     // Same rules as JwtStrategy: a login token (not an OTP proof), for a user
     // that still exists, issued since their last password change.
-    if (!isLoginTokenPayload(payload) || !isValidObjectId(payload.sub)) return false;
+    if (!isLoginTokenPayload(payload) || !isValidObjectId(payload.sub))
+      return false;
 
     const user = await this.usersService.findOneById(String(payload.sub));
     if (!user) return false;
@@ -91,7 +92,11 @@ export class OrdersController {
     const order = await this.ordersService.findOne(id);
     if (req.user.role !== UserRole.ADMIN) {
       const tribeId = await this.tribesService.findIdByUserId(userId);
-      assertOwnedBy((order as any).coachId, tribeId, 'Not authorized to access this order');
+      assertOwnedBy(
+        (order as any).coachId,
+        tribeId,
+        'Not authorized to access this order',
+      );
     }
     return order;
   }
@@ -172,6 +177,14 @@ export class OrdersController {
   @Roles(UserRole.ADMIN)
   async downloadMedia(@Body() dto: DownloadMediaDto, @Res() res: Response) {
     await this.ordersService.streamMediaZip(dto.orderIds || [], res);
+  }
+
+  // Admin "Postal CSV" tool: the orders behind scanned barcodes (read-only).
+  @Post('postal-csv/lookup')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  lookupForPostalCsv(@Body() dto: DeliverByTrackingDto) {
+    return this.ordersService.lookupForPostalCsv(dto.codes);
   }
 
   // Admin "Mark delivered" tool: check pasted barcodes (read-only), then mark
@@ -277,7 +290,9 @@ export class OrdersController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   async findAll() {
-    return this.ordersService.withPriorClaims(await this.ordersService.findAll());
+    return this.ordersService.withPriorClaims(
+      await this.ordersService.findAll(),
+    );
   }
 
   // Admin: orders whose phone number is on another order of the same tribe.
@@ -394,7 +409,12 @@ export class OrdersController {
   ) {
     await this.assertOrderOwnership(id, req, userId);
     const approvedBy = req.user.role === UserRole.ADMIN ? 'admin' : userId;
-    return this.ordersService.approveOrder(id, approvedBy, note, selectedItemIds);
+    return this.ordersService.approveOrder(
+      id,
+      approvedBy,
+      note,
+      selectedItemIds,
+    );
   }
 
   @Patch(':id/reject')
@@ -465,4 +485,3 @@ export class OrdersController {
     return this.ordersService.changeDeliveryType(id, deliveryType);
   }
 }
-
