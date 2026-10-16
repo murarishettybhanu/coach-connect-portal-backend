@@ -29,6 +29,7 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-status.dto';
 import { DownloadMediaDto } from './dto/download-media.dto';
 import { DeliverByTrackingDto } from './dto/deliver-by-tracking.dto';
+import { AddOrderItemDto } from './dto/edit-order-items.dto';
 import { CurrentUserId } from '../../common/decorators/current-user.decorator';
 import { assertOwnedBy } from '../../common/utils/ownership';
 import { AttachAddressDto, UpdateAddressDto } from './dto/attach-address.dto';
@@ -395,6 +396,35 @@ export class OrdersController {
       dto.trackingNumber,
       dto.deliveryType,
     );
+  }
+
+  // Admin: add a product to / remove one from an order that hasn't shipped.
+  @Post(':id/items')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  addItem(
+    @Param('id') id: string,
+    @Body() dto: AddOrderItemDto,
+    @Request() req,
+  ) {
+    return this.ordersService.addItem(id, dto, this.actorName(req));
+  }
+
+  @Delete(':id/items/:itemId')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  removeItem(
+    @Param('id') id: string,
+    @Param('itemId') itemId: string,
+    @Request() req,
+  ) {
+    return this.ordersService.removeItem(id, itemId, this.actorName(req));
+  }
+
+  /** "Asha (admin)" for the order's history. */
+  private actorName(req: any): string {
+    const u = req?.user ?? {};
+    return u.name || u.email || 'admin';
   }
 
   @Patch(':id/approve')

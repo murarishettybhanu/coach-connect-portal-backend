@@ -1410,3 +1410,207 @@ describe('applyStatusFilter (admin order lists)', () => {
     );
   });
 });
+
+describe('OrdersService — admin edits an order’s products', () => {
+  const ORDER = new Types.ObjectId().toString();
+  const LINE = new Types.ObjectId();
+  const EXTRA_LINE = new Types.ObjectId();
+  const orderDoc = (extra: any = {}) => ({
+    _id: ORDER,
+    coachId: TRIBE_ID,
+    type: OrderType.STORE_SALE,
+    status: OrderStatus.NEW,
+    approvalStatus: null,
+    items: [
+      {
+        _id: LINE,
+        productId: { _id: PRODUCT_ID, name: 'Tee' },
+        quantity: 2,
+        baseCost: 100,
+        retailPrice: 300,
+        commission: 400,
+        customizationType: 'SIZE',
+        customizationValue: 'M',
+      },
+      {
+        _id: EXTRA_LINE,
+        productId: { _id: 'p2', name: 'Bottle' },
+        quantity: 1,
+        baseCost: 50,
+        retailPrice: 0,
+        commission: 0,
+        extra: true,
+      },
+    ],
+    ...extra,
+  });
+  const sizedTee = {
+    _id: PRODUCT_ID,
+    coachId: TRIBE_ID,
+    name: 'Tee',
+    baseProductionCost: 100,
+    customizationType: 'SIZE',
+    sizeOptions: ['S', 'M', 'L'],
+  };
+
+  function editSetup(order: any = orderDoc()) {
+    const ctx = setup();
+    ctx.orderModel.findById.mockReturnValue(query(order));
+    ctx.orderModel.findOneAndUpdate.mockReturnValue(query(order));
+    ctx.orderModel.findOne.mockReturnValue(query(order));
+    (ctx.transactions as any).netCommissionForOrder = jest
+      .fn()
+      .mockResolvedValue(400);
+    return ctx;
+  }
+
+  describe('addItem', () => {
+    it('adds a free extra (₹0, no commission, cost recorded), size matched, stock deducted', async () => {
+      const { service, orderModel, products } = editSetup();
+      products.findOne.mockResolvedValue(sizedTee);
+      await service.addItem(
+        ORDER,
+        { productId: PRODUCT_ID, quantity: 3, customizationValue: ' m ' },
+        'Asha',
+      );
+      const [filter, update] = orderModel.findOneAndUpdate.mock.calls[0];
+      expect(filter.status).toEqual({
+        $in: [OrderStatus.NEW, OrderStatus.PACKED],
+      });
+      expect(update.$push.items).toMatchObject({
+        quantity: 3,
+        baseCost: 100,
+        retailPrice: 0,
+        commission: 0,
+        customizationValue: 'M',
+        extra: true,
+        selected: true,
+      });
+      expect(update.$inc).toEqual({ totalCost: 300 });
+      expect(update.$push.statusHistory.note).toBe(
+        'Added Tee × 3 (M) — by Asha',
+      );
+      expect(products.decrementStock).toHaveBeenCalledWith(PRODUCT_ID, 3, 'M');
+    });
+
+    it("refuses another tribe's product, a missing size or text, and shipped orders", async () => {
+      const a = editSetup();
+      a.products.findOne.mockResolvedValue({
+        ...sizedTee,
+        coachId: new Types.ObjectId().toString(),
+      });
+      await expect(
+        a.service.addItem(
+          ORDER,
+          { productId: PRODUCT_ID, quantity: 1, customizationValue: 'M' },
+          'x',
+        ),
+      ).rejects.toThrow("Pick one of this tribe's products");
+
+      const b = editSetup();
+      b.products.findOne.mockResolvedValue(sizedTee);
+      await expect(
+        b.service.addItem(
+          ORDER,
+          { productId: PRODUCT_ID, quantity: 1, customizationValue: 'XXL' },
+          'x',
+        ),
+      ).rejects.toThrow('Choose a size for Tee (S, M, L)');
+
+      const c = editSetup();
+      c.products.findOne.mockResolvedValue({
+        ...sizedTee,
+        customizationType: 'TEXT',
+      });
+      await expect(
+        c.service.addItem(ORDER, { productId: PRODUCT_ID, quantity: 1 }, 'x'),
+      ).rejects.toThrow('Enter the custom text for Tee');
+
+      const d = editSetup(orderDoc({ status: OrderStatus.DISPATCHED }));
+      await expect(
+        d.service.addItem(ORDER, { productId: PRODUCT_ID, quantity: 1 }, 'x'),
+      ).rejects.toThrow('before the order is dispatched');
+      expect(d.products.decrementStock).not.toHaveBeenCalled();
+    });
+
+    it('undoes the line if the stock move fails', async () => {
+      const { service, orderModel, products } = editSetup();
+      products.findOne.mockResolvedValue({
+        ...sizedTee,
+        customizationType: undefined,
+      });
+      products.decrementStock.mockRejectedValueOnce(new Error('db down'));
+      await expect(
+        service.addItem(ORDER, { productId: PRODUCT_ID, quantity: 1 }, 'x'),
+      ).rejects.toThrow('db down');
+      const [, undo] = orderModel.updateOne.mock.calls[0];
+      expect(undo.$pull.items._id).toBeDefined();
+      expect(undo.$inc).toEqual({ totalCost: -100 });
+    });
+  });
+
+  describe('removeItem', () => {
+    it('drops the line atomically, returns stock, lowers totals and reverses its commission', async () => {
+      const { service, orderModel, products, transactions } = editSetup();
+      await service.removeItem(ORDER, String(LINE), 'Asha');
+      const [filter, update] = orderModel.findOneAndUpdate.mock.calls[0];
+      expect(filter['items.1']).toEqual({ $exists: true }); // never the last line
+      expect(String(filter['items._id'])).toBe(String(LINE));
+      expect(update.$inc).toEqual({
+        totalAmount: -600,
+        totalCost: -200,
+        totalCommission: -400,
+      });
+      expect(update.$push.statusHistory.note).toBe(
+        'Removed Tee × 2 (M) — by Asha',
+      );
+      expect(products.incrementStock).toHaveBeenCalledWith(PRODUCT_ID, 2, 'M');
+      expect(transactions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'COMMISSION',
+          amount: -400,
+          orderId: ORDER,
+        }),
+      );
+    });
+
+    it('never reverses more commission than the order has recorded (none for a pending claim)', async () => {
+      const ctx = editSetup();
+      (ctx.transactions as any).netCommissionForOrder.mockResolvedValue(150);
+      await ctx.service.removeItem(ORDER, String(LINE), 'x');
+      expect(ctx.transactions.create).toHaveBeenCalledWith(
+        expect.objectContaining({ amount: -150 }),
+      );
+
+      const none = editSetup();
+      (none.transactions as any).netCommissionForOrder.mockResolvedValue(0);
+      await none.service.removeItem(ORDER, String(LINE), 'x');
+      expect(none.transactions.create).not.toHaveBeenCalled();
+    });
+
+    it('a free extra touches no money', async () => {
+      const { service, orderModel, transactions } = editSetup();
+      await service.removeItem(ORDER, String(EXTRA_LINE), 'x');
+      expect(orderModel.findOneAndUpdate.mock.calls[0][1].$inc).toEqual({
+        totalAmount: -0,
+        totalCost: -50,
+        totalCommission: -0,
+      });
+      expect(transactions.create).not.toHaveBeenCalled();
+    });
+
+    it('keeps at least one product, and 409s when the order changed meanwhile', async () => {
+      const one = editSetup(orderDoc({ items: [orderDoc().items[0]] }));
+      await expect(
+        one.service.removeItem(ORDER, String(LINE), 'x'),
+      ).rejects.toThrow('at least one product');
+
+      const raced = editSetup();
+      raced.orderModel.findOneAndUpdate.mockReturnValue(query(null));
+      await expect(
+        raced.service.removeItem(ORDER, String(LINE), 'x'),
+      ).rejects.toThrow('changed meanwhile');
+      expect(raced.products.incrementStock).not.toHaveBeenCalled();
+    });
+  });
+});
