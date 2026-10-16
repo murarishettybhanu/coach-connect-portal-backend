@@ -25,6 +25,14 @@ import {
 } from '../../common/kit-pricing';
 import { ProductsService } from '../products/products.service';
 import { matchSize, offeredSizes } from '../../common/sizes';
+import {
+  MAX_LOOKUP_VALUES,
+  andLookup,
+  parseLookup,
+  unmatchedValues,
+  type LookupReport,
+  type ParsedLookup,
+} from './order-lookup';
 import { TransactionsService } from '../transactions/transactions.service';
 import { TransactionType } from '../../schemas/transaction.schema';
 import { BarcodesService } from '../barcodes/barcodes.service';
@@ -1009,6 +1017,8 @@ export class OrdersService {
       page?: number;
       limit?: number;
       search?: string;
+      /** Advanced search: many phone numbers / tracking numbers / order ids … (order-lookup.ts). */
+      lookup?: string;
     } = {},
   ): Promise<{
     data: Order[];
@@ -1016,6 +1026,7 @@ export class OrdersService {
     page: number;
     limit: number;
     totalPages: number;
+    lookup?: LookupReport;
   }> {
     const page = Math.max(1, Number(options.page) || 1);
     const limit = pageSizeOf(options.limit, 20);
@@ -1029,6 +1040,8 @@ export class OrdersService {
     if (coaches) filter.coachId = coaches;
     andCampaignFilter(filter, options.campaignId);
 
+    const lookup = this.lookupOf(options.lookup);
+    this.applyLookup(filter, lookup);
     const search = options.search?.trim();
     if (search) {
       // Escape regex special chars so user input is treated literally.
@@ -1061,6 +1074,7 @@ export class OrdersService {
       page,
       limit,
       totalPages: Math.ceil(total / limit) || 1,
+      lookup: await this.lookupReport(filter, lookup),
     };
   }
 
@@ -1156,6 +1170,8 @@ export class OrdersService {
       page?: number;
       limit?: number;
       search?: string;
+      /** Advanced search: many phone numbers / tracking numbers / order ids … (order-lookup.ts). */
+      lookup?: string;
     } = {},
   ): Promise<{
     data: Order[];
@@ -1163,6 +1179,7 @@ export class OrdersService {
     page: number;
     limit: number;
     totalPages: number;
+    lookup?: LookupReport;
   }> {
     const page = Math.max(1, Number(options.page) || 1);
     const limit = pageSizeOf(options.limit, 20);
@@ -1176,6 +1193,8 @@ export class OrdersService {
     if (coaches) filter.coachId = coaches;
     andCampaignFilter(filter, options.campaignId);
 
+    const lookup = this.lookupOf(options.lookup);
+    this.applyLookup(filter, lookup);
     const search = options.search?.trim();
     if (search) {
       const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1207,6 +1226,7 @@ export class OrdersService {
       page,
       limit,
       totalPages: Math.ceil(total / limit) || 1,
+      lookup: await this.lookupReport(filter, lookup),
     };
   }
 
@@ -1301,11 +1321,15 @@ export class OrdersService {
   async findDeleted(
     coachId?: string | string[],
     campaignId?: string | string[],
+    // Advanced search (order-lookup.ts). The list isn't paginated, so the
+    // frontend works out unmatched values itself.
+    lookup?: string,
   ): Promise<Order[]> {
     const filter: any = { isDeleted: true };
     const coaches = coachIdsFilter(coachId);
     if (coaches) filter.coachId = coaches;
     andCampaignFilter(filter, campaignId);
+    this.applyLookup(filter, this.lookupOf(lookup));
     return this.orderModel
       .find(filter)
       .sort({ deletedAt: -1 })
@@ -1549,6 +1573,8 @@ export class OrdersService {
       page?: number;
       limit?: number;
       search?: string;
+      /** Advanced search: many phone numbers / tracking numbers / order ids … (order-lookup.ts). */
+      lookup?: string;
       status?: string;
       campaignId?: string | string[];
     } = {},
@@ -1558,6 +1584,7 @@ export class OrdersService {
     page: number;
     limit: number;
     totalPages: number;
+    lookup?: LookupReport;
   }> {
     const page = Math.max(1, Number(options.page) || 1);
     const limit = pageSizeOf(options.limit, 10);
@@ -1574,6 +1601,8 @@ export class OrdersService {
         ? { deliveredAt: -1, createdAt: -1 }
         : { createdAt: -1 };
 
+    const lookup = this.lookupOf(options.lookup);
+    this.applyLookup(filter, lookup);
     const search = options.search?.trim();
     if (search) {
       // Escape regex special chars so user input is treated literally
@@ -1609,6 +1638,7 @@ export class OrdersService {
       page,
       limit,
       totalPages: Math.ceil(total / limit) || 1,
+      lookup: await this.lookupReport(filter, lookup),
     };
   }
 
@@ -1619,6 +1649,8 @@ export class OrdersService {
       page?: number;
       limit?: number;
       search?: string;
+      /** Advanced search: many phone numbers / tracking numbers / order ids … (order-lookup.ts). */
+      lookup?: string;
       status?: string;
       coachId?: string | string[];
       campaignId?: string | string[];
@@ -1629,6 +1661,7 @@ export class OrdersService {
     page: number;
     limit: number;
     totalPages: number;
+    lookup?: LookupReport;
   }> {
     const page = Math.max(1, Number(options.page) || 1);
     const limit = pageSizeOf(options.limit, 10);
@@ -1645,6 +1678,8 @@ export class OrdersService {
         ? { deliveredAt: -1, createdAt: -1 }
         : { createdAt: -1 };
 
+    const lookup = this.lookupOf(options.lookup);
+    this.applyLookup(filter, lookup);
     const search = options.search?.trim();
     if (search) {
       const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1683,6 +1718,7 @@ export class OrdersService {
       page,
       limit,
       totalPages: Math.ceil(total / limit) || 1,
+      lookup: await this.lookupReport(filter, lookup),
     };
   }
 
@@ -1701,6 +1737,8 @@ export class OrdersService {
       page?: number;
       limit?: number;
       search?: string;
+      /** Advanced search: many phone numbers / tracking numbers / order ids … (order-lookup.ts). */
+      lookup?: string;
       status?: string;
       coachId?: string | string[];
       campaignId?: string | string[];
@@ -1712,6 +1750,7 @@ export class OrdersService {
     page: number;
     limit: number;
     totalPages: number;
+    lookup?: LookupReport;
   }> {
     const page = Math.max(1, Number(options.page) || 1);
     const limit = pageSizeOf(options.limit, 20);
@@ -1768,6 +1807,8 @@ export class OrdersService {
         narrow.approvalStatus = ApprovalStatus.PENDING;
       }
     }
+    const lookup = this.lookupOf(options.lookup);
+    this.applyLookup(narrow, lookup);
     const search = options.search?.trim();
     if (search) {
       const regex = new RegExp(
@@ -1822,6 +1863,45 @@ export class OrdersService {
       page,
       limit,
       totalPages: Math.ceil(total / limit) || 1,
+      // Over the duplicate rows kept (every page).
+      lookup: await this.lookupReport({ _id: { $in: ids } }, lookup),
+    };
+  }
+
+  /** Advanced search values from the query string (null when none were sent). */
+  private lookupOf(raw?: string): ParsedLookup | null {
+    if (!raw || !String(raw).trim()) return null;
+    const parsed = parseLookup(raw);
+    if (parsed.tokens.length > MAX_LOOKUP_VALUES) {
+      throw new BadRequestException(
+        `Up to ${MAX_LOOKUP_VALUES} values at a time — split the list`,
+      );
+    }
+    return parsed;
+  }
+
+  /** ANDs an advanced search onto a filter; values that were all unrecognised match nothing. */
+  private applyLookup(filter: any, lookup: ParsedLookup | null): void {
+    if (!lookup) return;
+    if (lookup.tokens.length) andLookup(filter, lookup.tokens);
+    else filter.$and = [...(filter.$and ?? []), { _id: { $in: [] } }];
+  }
+
+  /** Which searched values matched no order under `filter` (all pages). */
+  private async lookupReport(filter: any, lookup: ParsedLookup | null): Promise<LookupReport | undefined> {
+    if (!lookup) return undefined;
+    const matched: any[] = lookup.tokens.length
+      ? await this.orderModel
+          .find(filter)
+          .select('_id trackingNumber shippingAddress.phone shippingAddress.email shippingAddress.pincode')
+          .limit(20000)
+          .lean()
+          .exec()
+      : [];
+    return {
+      values: lookup.tokens.length,
+      unknown: lookup.unknown,
+      unmatched: unmatchedValues(lookup.tokens, matched),
     };
   }
 
