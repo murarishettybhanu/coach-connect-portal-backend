@@ -597,7 +597,16 @@ fields, messages fixed — change both sides together). No permission switch.
   `page`, `limit`): orders whose phone (last 10 chars) is on another non-rejected, non-deleted order of the same
   tribe; tribe/campaign set the scope, status/search only pick rows; grouped by number, newest group first;
   returns `groups` too (`findDuplicates`, real-Mongo test `orders-duplicates.int.spec.ts`),
-  `POST /postal-csv/lookup` (admin; `{ codes }`, same matching and cap as below; read-only): per code READY (Ready
+  `POST /:id/items` + `DELETE /:id/items/:itemId` (admin; orders not yet dispatched — Approval Pending / New / Ready
+  to Ship, not rejected or deleted): **add** one of the order's tribe's products as a **free extra** (`retailPrice` 0,
+  commission 0, `extra: true`, production cost added to `totalCost`, stock deducted size-aware; the product's size /
+  text / https photo is required; undone if the stock move fails); **remove** a line — one atomic guarded `$pull` that
+  never takes the last line (409 on a concurrent edit), `totalAmount` / `totalCost` / `totalCommission` drop by the
+  line's share (rounded, floored at 0), its stock goes back once (lines unticked at approval never returned theirs),
+  and commission already recorded is reversed with a negative COMMISSION entry — capped at the order's net recorded
+  commission (`netCommissionForOrder`; none for a pending claim). Both log `ITEM_ADDED` / `ITEM_REMOVED` in
+  `statusHistory` with who did it. Real-Mongo test: `order-items-edit.int.spec.ts`,
+ (admin; `{ codes }`, same matching and cap as below; read-only): per code READY (Ready
   to Ship) / NOT_PACKED / AWAITING_APPROVAL / ALREADY_DISPATCHED / CLOSED / MULTIPLE / NOT_FOUND, with the full order
   populated like the pipeline's (tribe, products, campaign parcel spec) when exactly one carries it — the frontend's
   Postal CSV tool builds the India Post booking file from it,

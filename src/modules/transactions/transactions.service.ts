@@ -104,6 +104,23 @@ export class TransactionsService {
     return this.transactionModel.find({ coachId } as any).sort({ createdAt: -1 }).exec();
   }
 
+  /** Commission recorded for an order so far, net of reversals (0 if none). */
+  async netCommissionForOrder(orderId: string): Promise<number> {
+    if (!isValidObjectId(orderId)) return 0;
+    const [row] = await this.transactionModel
+      .aggregate([
+        {
+          $match: {
+            orderId: toObjectId(orderId),
+            type: TransactionType.COMMISSION,
+          },
+        },
+        { $group: { _id: null, net: { $sum: '$amount' } } },
+      ])
+      .exec();
+    return Math.max(0, Math.round((row?.net ?? 0) * 100) / 100);
+  }
+
   /**
    * Takes back whatever commission an order still carries (order deleted, or
    * an approval undone). Appends a negative COMMISSION entry instead of

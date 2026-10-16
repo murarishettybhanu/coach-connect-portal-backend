@@ -67,6 +67,7 @@ export class Order extends Document {
         selected: { type: Boolean, default: true }, // unchecked during approval = not fulfilled
         customizationType: { type: String }, // TEXT | PHOTO | SIZE (from the product)
         customizationValue: { type: String }, // the customer-provided value
+        extra: { type: Boolean }, // added by an admin after the order was placed (free)
       },
     ],
   })
@@ -79,6 +80,7 @@ export class Order extends Document {
     selected: boolean;
     customizationType?: string;
     customizationValue?: string;
+    extra?: boolean;
   }[];
 
   @Prop({ default: 0 })

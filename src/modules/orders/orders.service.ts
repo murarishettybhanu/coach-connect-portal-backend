@@ -24,6 +24,7 @@ import {
   roundMoney,
 } from '../../common/kit-pricing';
 import { ProductsService } from '../products/products.service';
+import { matchSize, offeredSizes } from '../../common/sizes';
 import { TransactionsService } from '../transactions/transactions.service';
 import { TransactionType } from '../../schemas/transaction.schema';
 import { BarcodesService } from '../barcodes/barcodes.service';
@@ -155,6 +156,15 @@ const lineQuantity = (item: any): number =>
   Math.max(1, Math.floor(Number(item?.quantity)) || 1);
 
 // The size a stored order line was claimed in, so its stock moves in that size.
+// Orders whose products an admin may still change: not dispatched, not
+// rejected, not deleted (Approval Pending, New, Ready to Ship).
+const ITEMS_EDITABLE = {
+  status: { $in: ON_SHELF },
+  approvalStatus: { $ne: ApprovalStatus.REJECTED },
+  isDeleted: { $ne: true },
+};
+const round2 = (n: number) => Math.round((Number(n) || 0) * 100) / 100;
+
 const sizeOf = (item: any): string | undefined =>
   item?.customizationType === 'SIZE' ? item.customizationValue : undefined;
 
@@ -1813,6 +1823,260 @@ export class OrdersService {
       limit,
       totalPages: Math.ceil(total / limit) || 1,
     };
+  }
+
+  /** Why an order's products can't be changed (or nothing, when they can). */
+  private assertItemsEditable(order: any): void {
+    if (!order || order.isDeleted)
+      throw new NotFoundException('Order not found');
+    if (order.approvalStatus === ApprovalStatus.REJECTED)
+      throw new BadRequestException(
+        "A rejected claim's products can't be changed",
+      );
+    if (!ON_SHELF.includes(order.status))
+      throw new BadRequestException(
+        'Products can only be changed before the order is dispatched (Approval Pending, New or Ready to Ship)',
+      );
+  }
+
+  /** The customisation for a product being added: required when the product has one. */
+  private itemCustomization(product: any, raw?: string): string | undefined {
+    const type = String(product.customizationType ?? '').toUpperCase();
+    const value = String(raw ?? '').trim();
+    if (type === 'SIZE') {
+      const size = matchSize(product, value);
+      if (!size) {
+        const sizes = offeredSizes(product).join(', ');
+        throw new BadRequestException(
+          `Choose a size for ${product.name} (${sizes})`,
+        );
+      }
+      return size;
+    }
+    if (type === 'TEXT') {
+      if (!value)
+        throw new BadRequestException(
+          `Enter the custom text for ${product.name}`,
+        );
+      if (value.length > 200)
+        throw new BadRequestException(
+          'Custom text must be 200 characters or fewer',
+        );
+      return value;
+    }
+    if (type === 'PHOTO') {
+      if (!/^https:\/\/\S+$/i.test(value))
+        throw new BadRequestException(`Upload the photo for ${product.name}`);
+      return value;
+    }
+    return undefined;
+  }
+
+  /**
+   * Admin: adds one of the tribe's products to an order that hasn't shipped —
+   * as a **free extra**: ₹0 to the customer, no commission, its production
+   * cost recorded, stock deducted (size-aware). The customisation the product
+   * needs (size / text / photo) is required. Undone if the stock move fails.
+   */
+  async addItem(
+    id: string,
+    input: { productId: string; quantity: number; customizationValue?: string },
+    by: string,
+  ): Promise<Order> {
+    if (!isValidObjectId(id)) throw new NotFoundException('Order not found');
+    const order: any = await this.orderModel
+      .findById(id)
+      .select('coachId status approvalStatus isDeleted')
+      .lean()
+      .exec();
+    this.assertItemsEditable(order);
+    const product: any = isValidObjectId(input.productId)
+      ? await this.productsService.findOne(input.productId).catch(() => null)
+      : null;
+    if (
+      !product ||
+      product.isDeleted ||
+      String(product.coachId) !== String(order.coachId)
+    ) {
+      throw new BadRequestException("Pick one of this tribe's products");
+    }
+    const quantity = Math.floor(Number(input.quantity));
+    if (!(quantity >= 1 && quantity <= 100))
+      throw new BadRequestException('Quantity must be 1–100');
+    const customizationValue = this.itemCustomization(
+      product,
+      input.customizationValue,
+    );
+    const baseCost = round2(product.baseProductionCost);
+    const item = {
+      _id: new Types.ObjectId(),
+      productId: product._id,
+      quantity,
+      baseCost,
+      retailPrice: 0,
+      commission: 0,
+      selected: true,
+      customizationType: product.customizationType,
+      customizationValue,
+      extra: true,
+    };
+    const note = `Added ${product.name} × ${quantity}${customizationValue && product.customizationType !== 'PHOTO' ? ` (${customizationValue})` : ''} — by ${by}`;
+    const updated = await this.orderModel
+      .findOneAndUpdate(
+        { _id: id, ...ITEMS_EDITABLE } as any,
+        {
+          $push: {
+            items: item,
+            statusHistory: { status: 'ITEM_ADDED', at: new Date(), note },
+          },
+          $inc: { totalCost: round2(baseCost * quantity) },
+        },
+        { new: true },
+      )
+      .exec();
+    if (!updated)
+      throw new ConflictException(
+        'This order changed meanwhile and can no longer be edited',
+      );
+    try {
+      await this.productsService.decrementStock(
+        String(product._id),
+        quantity,
+        sizeOf(item),
+      );
+    } catch (err) {
+      await this.orderModel
+        .updateOne({ _id: id } as any, {
+          $pull: { items: { _id: item._id }, statusHistory: { note } },
+          $inc: { totalCost: -round2(baseCost * quantity) },
+        })
+        .exec()
+        .catch(() => undefined);
+      throw err;
+    }
+    this.logger.log(`Order ${id}: ${note}`);
+    return this.findOneForEdit(id);
+  }
+
+  /** The order as the admin popup shows it (products, tribe, campaign populated). */
+  private async findOneForEdit(id: string): Promise<Order> {
+    const order = await this.orderModel
+      .findOne({ _id: id, isDeleted: { $ne: true } } as any)
+      .populate('items.productId')
+      .populate('coachId')
+      .populate('campaignId', 'name type packageWeight length breadth height')
+      .exec();
+    if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
+    return order;
+  }
+
+  /**
+   * Admin: removes a product line from an order that hasn't shipped. Its stock
+   * goes back (size-aware, once — lines unticked at approval never returned
+   * theirs), the order's amount, cost and commission drop by the line's share,
+   * and commission already recorded for the line is reversed in the tribe's
+   * wallet (a negative COMMISSION entry, as for deleted orders) — never more
+   * than the order has net. An order keeps at least one product.
+   */
+  async removeItem(id: string, itemId: string, by: string): Promise<Order> {
+    if (!isValidObjectId(id) || !isValidObjectId(itemId))
+      throw new NotFoundException('Order not found');
+    const order: any = await this.orderModel
+      .findById(id)
+      .select('coachId status approvalStatus isDeleted type items')
+      .populate('items.productId', 'name')
+      .lean()
+      .exec();
+    this.assertItemsEditable(order);
+    const line = (order.items ?? []).find((i: any) => String(i._id) === itemId);
+    if (!line)
+      throw new NotFoundException('That product is no longer on this order');
+    if (order.items.length <= 1) {
+      throw new BadRequestException(
+        'An order needs at least one product — reject or delete the order instead',
+      );
+    }
+    const qty = Number(line.quantity) || 0;
+    const amount = round2((Number(line.retailPrice) || 0) * qty);
+    const cost = round2((Number(line.baseCost) || 0) * qty);
+    const commission = round2(line.commission);
+    const name = line.productId?.name ?? 'Product';
+    const note = `Removed ${name} × ${qty}${line.customizationValue && line.customizationType !== 'PHOTO' ? ` (${line.customizationValue})` : ''} — by ${by}`;
+
+    // Atomic: the line must still be there and the order still editable, and
+    // never the last line — two admins removing at once can't empty it.
+    const updated = await this.orderModel
+      .findOneAndUpdate(
+        {
+          _id: id,
+          ...ITEMS_EDITABLE,
+          'items._id': new Types.ObjectId(itemId),
+          'items.1': { $exists: true },
+        } as any,
+        {
+          $pull: { items: { _id: new Types.ObjectId(itemId) } },
+          $inc: {
+            totalAmount: -amount,
+            totalCost: -cost,
+            totalCommission: -commission,
+          },
+          $push: {
+            statusHistory: { status: 'ITEM_REMOVED', at: new Date(), note },
+          },
+        },
+        { new: true },
+      )
+      .exec();
+    if (!updated)
+      throw new ConflictException(
+        'This order changed meanwhile — reopen it and try again',
+      );
+    // Keep totals tidy (no -0.00000001 from float maths, never below zero).
+    await this.orderModel
+      .updateOne(
+        { _id: id } as any,
+        [
+          {
+            $set: {
+              totalAmount: { $max: [0, { $round: ['$totalAmount', 2] }] },
+              totalCost: { $max: [0, { $round: ['$totalCost', 2] }] },
+              totalCommission: {
+                $max: [0, { $round: ['$totalCommission', 2] }],
+              },
+            },
+          },
+        ] as any,
+        // Mongoose only runs an aggregation-pipeline update when asked to.
+        { updatePipeline: true } as any,
+      )
+      .exec();
+
+    const productId = String(line.productId?._id ?? line.productId ?? '');
+    try {
+      if (productId)
+        await this.productsService.incrementStock(productId, qty, sizeOf(line));
+    } catch (err) {
+      // The line is gone; flag it loudly rather than put it back.
+      this.logger.error(
+        `Order ${id}: removed ${name} × ${qty} but couldn't return its stock: ${(err as Error).message}`,
+      );
+    }
+
+    if (commission > 0) {
+      const recorded = await this.transactionsService.netCommissionForOrder(id);
+      const reverse = Math.min(commission, recorded);
+      if (reverse > 0) {
+        await this.transactionsService.create({
+          coachId: order.coachId,
+          type: TransactionType.COMMISSION,
+          amount: -reverse,
+          orderId: id,
+          description: `Item removed (${name} × ${qty}) — Order #${id.slice(-6)}`,
+        });
+      }
+    }
+    this.logger.log(`Order ${id}: ${note}`);
+    return this.findOneForEdit(id);
   }
 
   async findOne(id: string): Promise<Order> {
