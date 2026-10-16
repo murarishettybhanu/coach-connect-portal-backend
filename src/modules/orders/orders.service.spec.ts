@@ -1298,6 +1298,70 @@ describe('OrdersService — mark delivered by tracking', () => {
       'Up to 1000',
     );
   });
+
+  describe('postal CSV lookup', () => {
+    it('only Ready to Ship orders are READY, with the full populated order', async () => {
+      const packed = ord('EA300IN', OrderStatus.PACKED, {
+        campaignId: { _id: 'c1', packageWeight: 450 },
+      });
+      const found = [
+        packed,
+        ord('EA100IN', OrderStatus.NEW),
+        ord('EA400IN', OrderStatus.NEW, {
+          approvalStatus: ApprovalStatus.PENDING,
+        }),
+        ord('EA200IN', OrderStatus.DISPATCHED),
+        ord('EA210IN', OrderStatus.DELIVERED),
+        ord('EA600IN', OrderStatus.RETURNED),
+        ord('EA500IN', OrderStatus.PACKED),
+        ord('ea500in', OrderStatus.PACKED),
+      ];
+      const { service, orderModel } = trackSetup([]);
+      // A query whose populate calls can be inspected.
+      const q: any = {
+        lean: () => q,
+        exec: jest.fn().mockResolvedValue(found),
+      };
+      q.populate = jest.fn(() => q);
+      orderModel.find.mockReturnValue(q);
+      const rows = await service.lookupForPostalCsv([
+        ' ea300in',
+        'EA100IN',
+        'EA400IN',
+        'EA200IN',
+        'EA210IN',
+        'EA600IN',
+        'EA500IN',
+        'EA999IN',
+        'EA300IN',
+      ]);
+      expect(rows.map((r) => [r.code, r.state])).toEqual([
+        ['EA300IN', 'READY'],
+        ['EA100IN', 'NOT_PACKED'],
+        ['EA400IN', 'AWAITING_APPROVAL'],
+        ['EA200IN', 'ALREADY_DISPATCHED'],
+        ['EA210IN', 'ALREADY_DISPATCHED'],
+        ['EA600IN', 'CLOSED'],
+        ['EA500IN', 'MULTIPLE'],
+        ['EA999IN', 'NOT_FOUND'],
+      ]);
+      expect(rows[0].order).toBe(packed);
+      expect(rows[6]).toMatchObject({ order: null, matches: 2 });
+      // Populated for the CSV: tribe, products, campaign parcel spec.
+      expect(q.populate).toHaveBeenCalledWith(
+        'campaignId',
+        'name type packageWeight length breadth height',
+      );
+    });
+
+    it('refuses more than the cap of different codes', async () => {
+      const { service } = trackSetup([]);
+      const many = Array.from({ length: 1001 }, (_, i) => `EA${i}IN`);
+      await expect(service.lookupForPostalCsv(many)).rejects.toThrow(
+        'Up to 1000',
+      );
+    });
+  });
 });
 
 describe('applyStatusFilter (admin order lists)', () => {

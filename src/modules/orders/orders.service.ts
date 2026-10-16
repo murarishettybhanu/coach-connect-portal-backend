@@ -9,11 +9,20 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import type { Response } from 'express';
 import archiver = require('archiver');
-import { Order, OrderStatus, OrderType, ApprovalStatus } from '../../schemas/order.schema';
+import {
+  Order,
+  OrderStatus,
+  OrderType,
+  ApprovalStatus,
+} from '../../schemas/order.schema';
 import { refIdOf } from '../../common/utils/ownership';
 import { Campaign, CampaignFormType } from '../../schemas/campaign.schema';
 import { TribeKit } from '../../schemas/tribe-kit.schema';
-import { allocate, allocateUnitPrices, roundMoney } from '../../common/kit-pricing';
+import {
+  allocate,
+  allocateUnitPrices,
+  roundMoney,
+} from '../../common/kit-pricing';
 import { ProductsService } from '../products/products.service';
 import { TransactionsService } from '../transactions/transactions.service';
 import { TransactionType } from '../../schemas/transaction.schema';
@@ -25,7 +34,10 @@ import { MAX_TRACKING_CODES, uniqueCodes } from './tracking-codes';
 import { titleCaseName } from '../../common/utils/name.util';
 import { isAllowedMediaUrl } from '../../common/utils/media-url';
 import { pageSizeOf } from '../../common/utils/pagination.util';
-import { andCampaignFilter, coachIdsFilter } from '../../common/utils/coach-ids.util';
+import {
+  andCampaignFilter,
+  coachIdsFilter,
+} from '../../common/utils/coach-ids.util';
 import { MAX_MEDIA_ORDERS } from './dto/download-media.dto';
 import { TribeMembersService } from '../tribe-members/tribe-members.service';
 import { TribesService } from '../tribes/tribes.service';
@@ -54,8 +66,16 @@ const PENDING_KIT = {
  * NEW → DISPATCHED is the admin board's "dispatch without packing".
  */
 export const ALLOWED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  [OrderStatus.NEW]: [OrderStatus.PACKED, OrderStatus.DISPATCHED, OrderStatus.CANCELLED],
-  [OrderStatus.PACKED]: [OrderStatus.PACKED, OrderStatus.DISPATCHED, OrderStatus.CANCELLED],
+  [OrderStatus.NEW]: [
+    OrderStatus.PACKED,
+    OrderStatus.DISPATCHED,
+    OrderStatus.CANCELLED,
+  ],
+  [OrderStatus.PACKED]: [
+    OrderStatus.PACKED,
+    OrderStatus.DISPATCHED,
+    OrderStatus.CANCELLED,
+  ],
   [OrderStatus.DISPATCHED]: [OrderStatus.DISPATCHED, OrderStatus.DELIVERED],
   [OrderStatus.DELIVERED]: [],
   [OrderStatus.RETURNED]: [],
@@ -72,6 +92,25 @@ export type TrackingDeliveryState =
   // after a run
   | 'DELIVERED'
   | 'FAILED';
+
+/** Admin "Postal CSV" tool: what a scanned barcode is, and whether it can go in the booking CSV. */
+export type PostalScanState =
+  | 'READY' // Ready to Ship — goes in the CSV
+  | 'NOT_PACKED' // still New
+  | 'AWAITING_APPROVAL'
+  | 'ALREADY_DISPATCHED' // Dispatched or Delivered
+  | 'CLOSED' // returned / cancelled
+  | 'MULTIPLE'
+  | 'NOT_FOUND';
+
+export type PostalScanRow = {
+  code: string;
+  state: PostalScanState;
+  /** The full order (populated like the pipeline's) when exactly one carries the code. */
+  order: any | null;
+  /** How many orders carry it (MULTIPLE). */
+  matches: number;
+};
 
 export type TrackingDeliveryRow = {
   code: string;
@@ -107,7 +146,8 @@ const CLAIM_RECEIVED_TEMPLATE_ID = '1066935259306839';
 // URL is stable and versioned with the site. Either can be overridden by env
 // without a deploy; the platform mark remains the last resort.
 const DISPATCH_IMAGE_URL = 'https://tribemerchandise.com/whatsapp-dispatch.jpg';
-const DELIVERED_IMAGE_URL = 'https://tribemerchandise.com/whatsapp-delivered.jpg';
+const DELIVERED_IMAGE_URL =
+  'https://tribemerchandise.com/whatsapp-delivered.jpg';
 const DEFAULT_ORDER_IMAGE_URL = 'https://tribemerchandise.com/tribe-logo.png';
 
 // Units on a requested order line (the DTO caps it; this floors junk to 1).
@@ -125,14 +165,20 @@ const phoneKeyOf = (v: unknown): string =>
     .slice(-10);
 
 /** Values the admin order lists' status filter accepts. */
-export const FILTER_STATUSES = ['PENDING', ...Object.values(OrderStatus)] as string[];
+export const FILTER_STATUSES = [
+  'PENDING',
+  ...Object.values(OrderStatus),
+] as string[];
 
 /** One status's condition. "PENDING" = approval pending (those claims are NEW
  *  while they wait); "NEW" excludes them — they live in the approvals queue. */
 function statusCondition(status: string): Record<string, unknown> {
   if (status === 'PENDING') return { approvalStatus: ApprovalStatus.PENDING };
   if (status === OrderStatus.NEW) {
-    return { status: OrderStatus.NEW, approvalStatus: { $ne: ApprovalStatus.PENDING } };
+    return {
+      status: OrderStatus.NEW,
+      approvalStatus: { $ne: ApprovalStatus.PENDING },
+    };
   }
   return { status };
 }
@@ -145,7 +191,8 @@ export function parseStatuses(status?: string | string[]): string[] {
     .map((v) => v.trim().toUpperCase())
     .filter(Boolean);
   const bad = list.filter((v) => !FILTER_STATUSES.includes(v));
-  if (bad.length) throw new BadRequestException(`Unknown status: ${bad.join(', ')}`);
+  if (bad.length)
+    throw new BadRequestException(`Unknown status: ${bad.join(', ')}`);
   return [...new Set(list)];
 }
 
@@ -154,11 +201,17 @@ export function parseStatuses(status?: string | string[]): string[] {
  * ANDed in, so it sits alongside the not-rejected rule, the tribe / campaign
  * filters and the search's own $or.
  */
-export function applyStatusFilter(filter: Record<string, any>, status?: string | string[]) {
+export function applyStatusFilter(
+  filter: Record<string, any>,
+  status?: string | string[],
+) {
   const statuses = parseStatuses(status);
   if (!statuses.length) return filter;
   const conds = statuses.map(statusCondition);
-  filter.$and = [...(filter.$and ?? []), conds.length === 1 ? conds[0] : { $or: conds }];
+  filter.$and = [
+    ...(filter.$and ?? []),
+    conds.length === 1 ? conds[0] : { $or: conds },
+  ];
   return filter;
 }
 
@@ -216,13 +269,16 @@ export class OrdersService {
       const id = String(item.productId);
       sent.set(id, (sent.get(id) ?? 0) + lineQuantity(item));
     }
-    const mismatch = () => new BadRequestException("Quantities don't match this campaign");
+    const mismatch = () =>
+      new BadRequestException("Quantities don't match this campaign");
     for (const [id, qty] of sent) {
       if (required.get(id) !== qty) throw mismatch();
     }
     for (const id of required.keys()) {
       if (sent.has(id)) continue;
-      const product: any = await this.productsService.findOne(id).catch(() => null);
+      const product: any = await this.productsService
+        .findOne(id)
+        .catch(() => null);
       if (product && !product.isDeleted) throw mismatch();
     }
   }
@@ -235,7 +291,11 @@ export class OrdersService {
   private async effectiveKitPrice(campaign: any): Promise<number | null> {
     if (!campaign?.kitId) return null;
     if (campaign.kitPrice != null) return roundMoney(campaign.kitPrice);
-    const kit: any = await this.kitModel.findById(campaign.kitId).select('kitPrice').lean().exec();
+    const kit: any = await this.kitModel
+      .findById(campaign.kitId)
+      .select('kitPrice')
+      .lean()
+      .exec();
     return kit?.kitPrice != null ? roundMoney(kit.kitPrice) : null;
   }
 
@@ -246,7 +306,10 @@ export class OrdersService {
   // Everything that can reject the order is checked before any stock moves;
   // the writes that follow (stock, save, commission) are undone together if
   // one of them fails. No Mongo transaction — dev runs a standalone mongod.
-  async create(orderData: any, opts: { trusted?: boolean } = {}): Promise<Order> {
+  async create(
+    orderData: any,
+    opts: { trusted?: boolean } = {},
+  ): Promise<Order> {
     const rawItems: any[] = orderData.items || [];
     if (!rawItems.length) throw new BadRequestException('Order has no items');
 
@@ -254,7 +317,10 @@ export class OrdersService {
     // identity we have, so it has to be proven over WhatsApp. `trusted` covers
     // signed-in staff, who never see a claim form.
     if (orderData.campaignId && !opts.trusted) {
-      this.requireVerifiedPhone(orderData.otpToken, orderData.shippingAddress?.phone);
+      this.requireVerifiedPhone(
+        orderData.otpToken,
+        orderData.shippingAddress?.phone,
+      );
       this.validatePublicAddress(orderData.shippingAddress);
     }
 
@@ -330,16 +396,23 @@ export class OrdersService {
       // All items must belong to one tribe; derive it server-side.
       if (!coachId) coachId = String(product.coachId);
       else if (String(product.coachId) !== coachId) {
-        throw new BadRequestException('All items must belong to the same tribe');
+        throw new BadRequestException(
+          'All items must belong to the same tribe',
+        );
       }
       if (campaign && !campaignPrice.has(String(product._id))) {
         throw new BadRequestException('Product is not part of this campaign');
       }
       // A PHOTO value is a URL the server later downloads (media ZIP), so it
       // must point at our own upload bucket and nowhere else.
-      if (item.customizationType === 'PHOTO' && item.customizationValue &&
-          !isAllowedMediaUrl(item.customizationValue)) {
-        throw new BadRequestException('Upload the photo through the form before ordering');
+      if (
+        item.customizationType === 'PHOTO' &&
+        item.customizationValue &&
+        !isAllowedMediaUrl(item.customizationValue)
+      ) {
+        throw new BadRequestException(
+          'Upload the photo through the form before ordering',
+        );
       }
 
       const quantity = lineQuantity(item);
@@ -368,25 +441,40 @@ export class OrdersService {
         // Weight for kit-price allocation below; not stored.
         productRetail: product.retailPrice || 0,
         ...(item.customizationType
-          ? { customizationType: item.customizationType, customizationValue: item.customizationValue }
+          ? {
+              customizationType: item.customizationType,
+              customizationValue: item.customizationValue,
+            }
           : {}),
       });
     }
 
-    if (!coachId) throw new BadRequestException('Could not resolve the tribe for this order');
+    if (!coachId)
+      throw new BadRequestException(
+        'Could not resolve the tribe for this order',
+      );
 
     // A kit-linked store sale charges the kit price P for the whole claim, not
     // the sum of its lines. P (as per-unit prices) and the commission it leaves
     // (never negative) are spread over the lines by retail value, to the
     // paisa, so the lines add up to the totals — see allocateUnitPrices for
     // the one case a unit price can't land exactly.
-    const kitPrice = type === OrderType.STORE_SALE ? await this.effectiveKitPrice(campaign) : null;
+    const kitPrice =
+      type === OrderType.STORE_SALE
+        ? await this.effectiveKitPrice(campaign)
+        : null;
     if (kitPrice != null) {
-      const retailValues = itemsWithDetails.map((l) => (l.productRetail || 0) * l.quantity);
+      const retailValues = itemsWithDetails.map(
+        (l) => (l.productRetail || 0) * l.quantity,
+      );
       const quantities = itemsWithDetails.map((l) => l.quantity);
       totalAmount = kitPrice;
       totalCommission = Math.max(0, roundMoney(kitPrice - totalCost));
-      const unitPrices = allocateUnitPrices(totalAmount, retailValues, quantities);
+      const unitPrices = allocateUnitPrices(
+        totalAmount,
+        retailValues,
+        quantities,
+      );
       const commissions = allocate(totalCommission, retailValues, quantities);
       itemsWithDetails.forEach((line, i) => {
         line.retailPrice = unitPrices[i];
@@ -412,11 +500,15 @@ export class OrdersService {
       totalCost,
       status: OrderStatus.NEW,
       approvalStatus: isWelcomeKit ? ApprovalStatus.PENDING : null,
-      statusHistory: [{
-        status: OrderStatus.NEW,
-        at: new Date(),
-        note: isWelcomeKit ? 'Order placed — awaiting approval' : 'Order placed',
-      }],
+      statusHistory: [
+        {
+          status: OrderStatus.NEW,
+          at: new Date(),
+          note: isWelcomeKit
+            ? 'Order placed — awaiting approval'
+            : 'Order placed',
+        },
+      ],
     });
     // Schema validation up front too, so a bad document never costs stock.
     await order.validate();
@@ -426,7 +518,9 @@ export class OrdersService {
     if (!campaign && coachId && !opts.trusted) {
       const allowed = await this.tribes.permissionsOf(coachId);
       if (!allowed.storefront) {
-        throw new BadRequestException('This store is not taking orders right now');
+        throw new BadRequestException(
+          'This store is not taking orders right now',
+        );
       }
     }
 
@@ -438,8 +532,16 @@ export class OrdersService {
       // shortfall is what the admin restocks. A sized item draws from its size.
       for (const item of itemsWithDetails) {
         const size = sizeOf(item);
-        await this.productsService.decrementStock(String(item.productId), item.quantity, size);
-        decremented.push({ id: String(item.productId), qty: item.quantity, size });
+        await this.productsService.decrementStock(
+          String(item.productId),
+          item.quantity,
+          size,
+        );
+        decremented.push({
+          id: String(item.productId),
+          qty: item.quantity,
+          size,
+        });
       }
 
       savedOrder = await order.save();
@@ -457,16 +559,20 @@ export class OrdersService {
     } catch (err) {
       // Compensate: drop the half-made order and restore any stock taken.
       if (savedOrder) {
-        await this.orderModel.deleteOne({ _id: savedOrder._id } as any).exec().catch(() => undefined);
+        await this.orderModel
+          .deleteOne({ _id: savedOrder._id } as any)
+          .exec()
+          .catch(() => undefined);
       }
-      for (const d of decremented) await this.productsService.incrementStock(d.id, d.qty, d.size);
+      for (const d of decremented)
+        await this.productsService.incrementStock(d.id, d.qty, d.size);
       throw err;
     }
 
     // Increment campaign claims if applicable
     if (orderData.campaignId) {
       await this.campaignModel.findByIdAndUpdate(orderData.campaignId, {
-        $inc: { claims: 1 }
+        $inc: { claims: 1 },
       });
     }
 
@@ -485,9 +591,16 @@ export class OrdersService {
    * Whether a signed-in TRIBE caller owns the campaign it is submitting
    * against — part of deciding if it may skip the public-form checks.
    */
-  async isCampaignOwnedBy(campaignId: string, coachId: string): Promise<boolean> {
+  async isCampaignOwnedBy(
+    campaignId: string,
+    coachId: string,
+  ): Promise<boolean> {
     if (!isValidObjectId(campaignId) || !coachId) return false;
-    const campaign = await this.campaignModel.findById(campaignId).select('coachId').lean().exec();
+    const campaign = await this.campaignModel
+      .findById(campaignId)
+      .select('coachId')
+      .lean()
+      .exec();
     return !!campaign && String(campaign.coachId) === String(coachId);
   }
 
@@ -557,8 +670,12 @@ export class OrdersService {
     if (claims.length) {
       const siblings = await this.orderModel
         .find({
-          memberId: { $in: [...new Set(claims.map((o) => refIdOf(o.memberId)))] },
-          campaignId: { $in: [...new Set(claims.map((o) => refIdOf(o.campaignId)))] },
+          memberId: {
+            $in: [...new Set(claims.map((o) => refIdOf(o.memberId)))],
+          },
+          campaignId: {
+            $in: [...new Set(claims.map((o) => refIdOf(o.campaignId)))],
+          },
           isDeleted: { $ne: true },
           approvalStatus: { $ne: ApprovalStatus.REJECTED },
         } as any)
@@ -604,13 +721,20 @@ export class OrdersService {
   // number over WhatsApp — otherwise this would map phone numbers to names.
   async findPendingClaim(campaignId: string, phone: string, otpToken?: string) {
     const cleanPhone = String(phone || '').trim();
-    if (!isValidObjectId(campaignId) || !cleanPhone) return { found: false, count: 0 };
+    if (!isValidObjectId(campaignId) || !cleanPhone)
+      return { found: false, count: 0 };
     const orders = await this.orderModel
-      .find({ campaignId, addressPending: true, 'shippingAddress.phone': cleanPhone, isDeleted: { $ne: true } } as any)
+      .find({
+        campaignId,
+        addressPending: true,
+        'shippingAddress.phone': cleanPhone,
+        isDeleted: { $ne: true },
+      } as any)
       .select('shippingAddress.fullName createdAt')
       .sort({ createdAt: -1 })
       .exec();
-    const verified = !!otpToken && this.otpService.checkProof(otpToken, cleanPhone).ok;
+    const verified =
+      !!otpToken && this.otpService.checkProof(otpToken, cleanPhone).ok;
     return {
       found: orders.length > 0,
       count: orders.length,
@@ -678,7 +802,11 @@ export class OrdersService {
     campaignId: string,
     phone: string,
     address: any,
-    opts: { trusted?: boolean; otpToken?: string; termsAccepted?: boolean } = {},
+    opts: {
+      trusted?: boolean;
+      otpToken?: string;
+      termsAccepted?: boolean;
+    } = {},
   ) {
     // This decides where someone else's kit ships, so a phone number alone is
     // not enough.
@@ -689,10 +817,17 @@ export class OrdersService {
 
     const cleanPhone = String(phone || '').trim();
     const orders = await this.orderModel
-      .find({ campaignId, addressPending: true, 'shippingAddress.phone': cleanPhone, isDeleted: { $ne: true } } as any)
+      .find({
+        campaignId,
+        addressPending: true,
+        'shippingAddress.phone': cleanPhone,
+        isDeleted: { $ne: true },
+      } as any)
       .exec();
     if (!orders.length) {
-      throw new NotFoundException('No pending claim found for this phone number');
+      throw new NotFoundException(
+        'No pending claim found for this phone number',
+      );
     }
     for (const order of orders) {
       order.shippingAddress = this.mergeAddress(order.shippingAddress, address);
@@ -710,9 +845,16 @@ export class OrdersService {
 
   // Tribe/Admin: list a campaign's address-pending claims (bulk upload + count).
   // When coachId is given (tribe caller), scoped to that tribe's own orders.
-  async findAddressPending(campaignId: string, coachId?: string): Promise<Order[]> {
+  async findAddressPending(
+    campaignId: string,
+    coachId?: string,
+  ): Promise<Order[]> {
     if (!isValidObjectId(campaignId)) return [];
-    const filter: any = { campaignId, addressPending: true, isDeleted: { $ne: true } };
+    const filter: any = {
+      campaignId,
+      addressPending: true,
+      isDeleted: { $ne: true },
+    };
     if (coachId) filter.coachId = coachId;
     return this.orderModel
       .find(filter)
@@ -765,7 +907,10 @@ export class OrdersService {
     if (order.status === OrderStatus.PACKED) {
       await this.barcodesService.releaseFromOrder(id);
       await this.orderModel
-        .updateOne({ _id: id } as any, { $unset: { trackingNumber: 1 }, $set: { barcodePending: false } })
+        .updateOne({ _id: id } as any, {
+          $unset: { trackingNumber: 1 },
+          $set: { barcodePending: false },
+        })
         .exec();
     }
     await this.transactionsService.reverseByOrder(id, 'Order deleted');
@@ -790,7 +935,8 @@ export class OrdersService {
     const eligibleForCommission =
       order.totalCommission > 0 &&
       (order.type === OrderType.STORE_SALE ||
-        (order.type === OrderType.WELCOME_KIT && order.approvalStatus === ApprovalStatus.APPROVED));
+        (order.type === OrderType.WELCOME_KIT &&
+          order.approvalStatus === ApprovalStatus.APPROVED));
     if (eligibleForCommission) {
       await this.transactionsService.create({
         coachId: order.coachId as any,
@@ -804,7 +950,9 @@ export class OrdersService {
     // its previous one was freed on delete.
     if (order.status === OrderStatus.PACKED && !order.trackingNumber) {
       const type = (order.deliveryType as BarcodeType | null) || null;
-      const bc = type ? await this.barcodesService.assignToOrder(id, type) : null;
+      const bc = type
+        ? await this.barcodesService.assignToOrder(id, type)
+        : null;
       await this.orderModel
         .updateOne(
           { _id: id } as any,
@@ -822,8 +970,18 @@ export class OrdersService {
     for (const item of items || []) {
       const pid = (item.productId as any)?._id || item.productId;
       if (!pid) continue;
-      if (direction > 0) await this.productsService.incrementStock(String(pid), item.quantity, sizeOf(item));
-      else await this.productsService.decrementStock(String(pid), item.quantity, sizeOf(item));
+      if (direction > 0)
+        await this.productsService.incrementStock(
+          String(pid),
+          item.quantity,
+          sizeOf(item),
+        );
+      else
+        await this.productsService.decrementStock(
+          String(pid),
+          item.quantity,
+          sizeOf(item),
+        );
     }
   }
 
@@ -887,7 +1045,13 @@ export class OrdersService {
       this.orderModel.countDocuments(filter).exec(),
     ]);
 
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit) || 1 };
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+    };
   }
 
   /**
@@ -898,10 +1062,7 @@ export class OrdersService {
    * is deliberately left alone — reversing a tribe's earnings is a money
    * decision, not a side effect of scanning a barcode.
    */
-  async markReturned(
-    trackingNumber: string,
-    note?: string,
-  ): Promise<Order> {
+  async markReturned(trackingNumber: string, note?: string): Promise<Order> {
     const code = (trackingNumber || '').trim();
     if (!code) throw new BadRequestException('Enter or scan a tracking number');
     // Scanned or typed in any case; stored numbers may be padded or lowercase.
@@ -909,7 +1070,10 @@ export class OrdersService {
     const numberMatch = new RegExp(`^\\s*${escaped}\\s*$`, 'i');
     // A number on several orders is ambiguous — refuse rather than return a random one.
     const onOrders = await this.orderModel
-      .countDocuments({ trackingNumber: numberMatch, isDeleted: { $ne: true } } as any)
+      .countDocuments({
+        trackingNumber: numberMatch,
+        isDeleted: { $ne: true },
+      } as any)
       .exec();
     if (onOrders > 1) {
       throw new BadRequestException(
@@ -928,22 +1092,35 @@ export class OrdersService {
           status: { $in: [OrderStatus.DISPATCHED, OrderStatus.DELIVERED] },
         } as any,
         {
-          $set: { status: OrderStatus.RETURNED, returnedAt: now, ...(note ? { returnNote: note } : {}) },
-          $push: { statusHistory: { status: OrderStatus.RETURNED, at: now, note } },
+          $set: {
+            status: OrderStatus.RETURNED,
+            returnedAt: now,
+            ...(note ? { returnNote: note } : {}),
+          },
+          $push: {
+            statusHistory: { status: OrderStatus.RETURNED, at: now, note },
+          },
         },
         { new: true },
       )
       .exec();
     if (!order) {
       const existing = await this.orderModel
-        .findOne({ trackingNumber: numberMatch, isDeleted: { $ne: true } } as any)
+        .findOne({
+          trackingNumber: numberMatch,
+          isDeleted: { $ne: true },
+        } as any)
         .select('status')
         .exec();
       if (!existing) {
-        throw new NotFoundException(`No order found with tracking number ${code}`);
+        throw new NotFoundException(
+          `No order found with tracking number ${code}`,
+        );
       }
       if (existing.status === OrderStatus.RETURNED) {
-        throw new BadRequestException('That parcel is already logged as returned');
+        throw new BadRequestException(
+          'That parcel is already logged as returned',
+        );
       }
       // A parcel can only come back if it went out.
       throw new BadRequestException(
@@ -1014,7 +1191,13 @@ export class OrdersService {
       this.orderModel.countDocuments(filter).exec(),
     ]);
 
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit) || 1 };
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+    };
   }
 
   /**
@@ -1032,16 +1215,27 @@ export class OrdersService {
     const replacementId = new Types.ObjectId();
     const original = await this.orderModel
       .findOneAndUpdate(
-        { _id: id, status: OrderStatus.RETURNED, reorderedTo: null, isDeleted: { $ne: true } } as any,
+        {
+          _id: id,
+          status: OrderStatus.RETURNED,
+          reorderedTo: null,
+          isDeleted: { $ne: true },
+        } as any,
         { $set: { reorderedTo: replacementId } },
         { new: false },
       )
       .exec();
     if (!original) {
-      const existing = await this.orderModel.findById(id).select('status reorderedTo isDeleted').exec();
-      if (!existing || existing.isDeleted) throw new NotFoundException(`Order with ID ${id} not found`);
+      const existing = await this.orderModel
+        .findById(id)
+        .select('status reorderedTo isDeleted')
+        .exec();
+      if (!existing || existing.isDeleted)
+        throw new NotFoundException(`Order with ID ${id} not found`);
       if (existing.status !== OrderStatus.RETURNED) {
-        throw new BadRequestException('Only a returned order can be sent again');
+        throw new BadRequestException(
+          'Only a returned order can be sent again',
+        );
       }
       throw new BadRequestException('This return has already been sent again');
     }
@@ -1066,7 +1260,9 @@ export class OrdersService {
         : original.shippingAddress,
       deliveryType: original.deliveryType,
       reorderedFrom: original._id,
-      statusHistory: [{ status: OrderStatus.NEW, at: now, note: 'Re-sent after return' }],
+      statusHistory: [
+        { status: OrderStatus.NEW, at: now, note: 'Re-sent after return' },
+      ],
     });
 
     // Stock was returned when the parcel came back; the replacement consumes it.
@@ -1081,7 +1277,9 @@ export class OrdersService {
       // Undo the claim so the return can be re-sent once the problem is fixed.
       if (stockTaken) await this.moveItemsStock(original.items, +1);
       await this.orderModel
-        .updateOne({ _id: id, reorderedTo: replacementId } as any, { $unset: { reorderedTo: 1 } })
+        .updateOne({ _id: id, reorderedTo: replacementId } as any, {
+          $unset: { reorderedTo: 1 },
+        })
         .exec();
       throw err;
     }
@@ -1148,26 +1346,40 @@ export class OrdersService {
 
     const archive = archiver('zip', { zlib: { level: 5 } });
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', 'attachment; filename="order-media.zip"');
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="order-media.zip"',
+    );
     archive.on('error', () => {
-      try { if (!res.headersSent) res.status(500); res.end(); } catch { /* noop */ }
+      try {
+        if (!res.headersSent) res.status(500);
+        res.end();
+      } catch {
+        /* noop */
+      }
     });
     archive.pipe(res);
 
     const used = new Set<string>();
     for (const o of orders) {
       const base =
-        (String((o.shippingAddress as any)?.fullName || 'order').replace(/[^\w-]+/g, '_').slice(0, 40)) || 'order';
+        String((o.shippingAddress as any)?.fullName || 'order')
+          .replace(/[^\w-]+/g, '_')
+          .slice(0, 40) || 'order';
       const short = String(o._id).slice(-6);
       let idx = 0;
-      for (const item of ((o.items as any[]) || [])) {
-        if (item.customizationType !== 'PHOTO' || !item.customizationValue) continue;
+      for (const item of (o.items as any[]) || []) {
+        if (item.customizationType !== 'PHOTO' || !item.customizationValue)
+          continue;
         // Only our own bucket is ever fetched — older orders may hold anything.
         if (!isAllowedMediaUrl(item.customizationValue)) continue;
         try {
           const buf = await this.fetchMedia(String(item.customizationValue));
           if (!buf) continue;
-          const ext = (String(item.customizationValue).split('?')[0].split('.').pop() || 'jpg').slice(0, 5);
+          const ext = (
+            String(item.customizationValue).split('?')[0].split('.').pop() ||
+            'jpg'
+          ).slice(0, 5);
           let name = `${base}-${short}-${++idx}.${ext}`;
           while (used.has(name)) name = `${base}-${short}-${++idx}.${ext}`;
           used.add(name);
@@ -1196,7 +1408,9 @@ export class OrdersService {
       },
       $push: { statusHistory: { status: 'APPROVED', at: now, note } },
     };
-    const options: { new: true; arrayFilters?: Record<string, unknown>[] } = { new: true };
+    const options: { new: true; arrayFilters?: Record<string, unknown>[] } = {
+      new: true,
+    };
 
     // If a selection was provided, mark items not in the list as unselected
     // (item is kept in the order, only its `selected` flag changes).
@@ -1215,11 +1429,7 @@ export class OrdersService {
     // Atomic PENDING → APPROVED: a double click (or tribe and admin at once)
     // approves once, so commission is recorded once.
     const savedOrder = await this.orderModel
-      .findOneAndUpdate(
-        { _id: id, ...PENDING_KIT } as any,
-        update,
-        options,
-      )
+      .findOneAndUpdate({ _id: id, ...PENDING_KIT } as any, update, options)
       .exec();
     if (!savedOrder) await this.explainNotPending(id);
 
@@ -1237,7 +1447,11 @@ export class OrdersService {
     return savedOrder!;
   }
 
-  async rejectOrder(id: string, rejectedBy: string, note?: string): Promise<Order> {
+  async rejectOrder(
+    id: string,
+    rejectedBy: string,
+    note?: string,
+  ): Promise<Order> {
     const now = new Date();
     // Atomic PENDING → REJECTED, returning the order as it was, so stock is
     // restored exactly once. Only while it is still on the shelf.
@@ -1265,7 +1479,10 @@ export class OrdersService {
     if (before!.status === OrderStatus.PACKED) {
       await this.barcodesService.releaseFromOrder(id);
       await this.orderModel
-        .updateOne({ _id: id } as any, { $unset: { trackingNumber: 1 }, $set: { barcodePending: false } })
+        .updateOne({ _id: id } as any, {
+          $unset: { trackingNumber: 1 },
+          $set: { barcodePending: false },
+        })
         .exec();
     }
     return this.findOne(id);
@@ -1278,14 +1495,19 @@ export class OrdersService {
       .select('type approvalStatus')
       .exec();
     if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
-    if (order.type !== OrderType.WELCOME_KIT) throw new BadRequestException('Only Welcome Kit orders require approval');
+    if (order.type !== OrderType.WELCOME_KIT)
+      throw new BadRequestException('Only Welcome Kit orders require approval');
     throw new BadRequestException('Order is not pending approval');
   }
 
   async findPendingApprovals(coachId?: string): Promise<Order[]> {
-    const filter: any = { approvalStatus: ApprovalStatus.PENDING, isDeleted: { $ne: true } };
+    const filter: any = {
+      approvalStatus: ApprovalStatus.PENDING,
+      isDeleted: { $ne: true },
+    };
     if (coachId) filter.coachId = coachId;
-    return this.orderModel.find(filter)
+    return this.orderModel
+      .find(filter)
       .sort({ createdAt: -1 })
       .populate('coachId')
       .populate('items.productId')
@@ -1293,11 +1515,22 @@ export class OrdersService {
   }
 
   async findAll(): Promise<Order[]> {
-    return this.orderModel.find({ ...NOT_REJECTED, isDeleted: { $ne: true } } as any).sort({ createdAt: -1 }).populate('coachId').populate('items.productId').populate('campaignId', 'name type packageWeight length breadth height').exec();
+    return this.orderModel
+      .find({ ...NOT_REJECTED, isDeleted: { $ne: true } } as any)
+      .sort({ createdAt: -1 })
+      .populate('coachId')
+      .populate('items.productId')
+      .populate('campaignId', 'name type packageWeight length breadth height')
+      .exec();
   }
 
   async findByCoach(coachId: string): Promise<Order[]> {
-    return this.orderModel.find({ ...NOT_REJECTED, coachId, isDeleted: { $ne: true } } as any).sort({ createdAt: -1 }).populate('items.productId').populate('campaignId', 'name type packageWeight length breadth height').exec();
+    return this.orderModel
+      .find({ ...NOT_REJECTED, coachId, isDeleted: { $ne: true } } as any)
+      .sort({ createdAt: -1 })
+      .populate('items.productId')
+      .populate('campaignId', 'name type packageWeight length breadth height')
+      .exec();
   }
 
   async findByCoachPaginated(
@@ -1326,9 +1559,10 @@ export class OrdersService {
     applyStatusFilter(filter, options.status);
 
     // Delivered orders sort by delivery time (newest first); fall back to creation time.
-    const sort: any = String(options.status ?? '').toUpperCase() === OrderStatus.DELIVERED
-      ? { deliveredAt: -1, createdAt: -1 }
-      : { createdAt: -1 };
+    const sort: any =
+      String(options.status ?? '').toUpperCase() === OrderStatus.DELIVERED
+        ? { deliveredAt: -1, createdAt: -1 }
+        : { createdAt: -1 };
 
     const search = options.search?.trim();
     if (search) {
@@ -1396,9 +1630,10 @@ export class OrdersService {
     andCampaignFilter(filter, options.campaignId);
     applyStatusFilter(filter, options.status);
 
-    const sort: any = String(options.status ?? '').toUpperCase() === OrderStatus.DELIVERED
-      ? { deliveredAt: -1, createdAt: -1 }
-      : { createdAt: -1 };
+    const sort: any =
+      String(options.status ?? '').toUpperCase() === OrderStatus.DELIVERED
+        ? { deliveredAt: -1, createdAt: -1 }
+        : { createdAt: -1 };
 
     const search = options.search?.trim();
     if (search) {
@@ -1423,7 +1658,10 @@ export class OrdersService {
         .skip(skip)
         .limit(limit)
         .populate('items.productId')
-        .populate({ path: 'coachId', populate: { path: 'userId', select: 'name email' } })
+        .populate({
+          path: 'coachId',
+          populate: { path: 'userId', select: 'name email' },
+        })
         .populate('campaignId', 'name type packageWeight length breadth height')
         .exec(),
       this.orderModel.countDocuments(filter).exec(),
@@ -1475,7 +1713,9 @@ export class OrdersService {
 
     // Aggregation doesn't cast like find(): turn id strings into ObjectIds first.
     const match = this.orderModel.find().cast(this.orderModel, scope);
-    const phone = { $trim: { input: { $ifNull: ['$shippingAddress.phone', ''] } } };
+    const phone = {
+      $trim: { input: { $ifNull: ['$shippingAddress.phone', ''] } },
+    };
     const grouped: { ids: Types.ObjectId[] }[] = await this.orderModel
       .aggregate([
         { $match: match },
@@ -1487,7 +1727,11 @@ export class OrdersService {
             _id: {
               coachId: '$coachId',
               phone: {
-                $substrCP: ['$p', { $max: [{ $subtract: [{ $strLenCP: '$p' }, 10] }, 0] }, 10],
+                $substrCP: [
+                  '$p',
+                  { $max: [{ $subtract: [{ $strLenCP: '$p' }, 10] }, 0] },
+                  10,
+                ],
               },
             },
             ids: { $push: '$_id' },
@@ -1516,7 +1760,10 @@ export class OrdersService {
     }
     const search = options.search?.trim();
     if (search) {
-      const regex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      const regex = new RegExp(
+        search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+        'i',
+      );
       narrow.$or = [
         { 'shippingAddress.fullName': regex },
         { 'shippingAddress.phone': regex },
@@ -1534,7 +1781,9 @@ export class OrdersService {
             .exec()
         ).map((o: any) => String(o._id)),
       );
-      groupsOf = groupsOf.map((g) => g.filter((id) => keep.has(id))).filter((g) => g.length);
+      groupsOf = groupsOf
+        .map((g) => g.filter((id) => keep.has(id)))
+        .filter((g) => g.length);
     }
 
     const ids = groupsOf.flat();
@@ -1544,8 +1793,14 @@ export class OrdersService {
       ? await this.orderModel
           .find({ _id: { $in: pageIds } } as any)
           .populate('items.productId')
-          .populate({ path: 'coachId', populate: { path: 'userId', select: 'name email' } })
-          .populate('campaignId', 'name type packageWeight length breadth height')
+          .populate({
+            path: 'coachId',
+            populate: { path: 'userId', select: 'name email' },
+          })
+          .populate(
+            'campaignId',
+            'name type packageWeight length breadth height',
+          )
           .exec()
       : [];
     const byId = new Map(docs.map((d: any) => [String(d._id), d]));
@@ -1593,7 +1848,8 @@ export class OrdersService {
     const skippingDispatch =
       !!opts.skipDispatch &&
       status === OrderStatus.DELIVERED &&
-      (previousStatus === OrderStatus.NEW || previousStatus === OrderStatus.PACKED);
+      (previousStatus === OrderStatus.NEW ||
+        previousStatus === OrderStatus.PACKED);
     if (
       !skippingDispatch &&
       !(ALLOWED_TRANSITIONS[previousStatus] || []).includes(status)
@@ -1606,7 +1862,9 @@ export class OrdersService {
       order.approvalStatus === ApprovalStatus.PENDING &&
       status !== OrderStatus.CANCELLED
     ) {
-      throw new BadRequestException('Approve this claim before it can be fulfilled');
+      throw new BadRequestException(
+        'Approve this claim before it can be fulfilled',
+      );
     }
 
     const $set: any = { status };
@@ -1624,7 +1882,8 @@ export class OrdersService {
       // Resolve the delivery type: an explicit choice at pack time (confirmation
       // dialog) wins, otherwise the order's own type. NEVER default silently — a
       // barcode is a real consignment, so an unset type must be chosen first.
-      const resolvedType = deliveryType || (order.deliveryType as BarcodeType | null);
+      const resolvedType =
+        deliveryType || (order.deliveryType as BarcodeType | null);
       if (!resolvedType) {
         throw new BadRequestException(
           'Choose a delivery type (Speed Post or Business Parcel) before packing this order',
@@ -1634,7 +1893,10 @@ export class OrdersService {
         $set.deliveryType = deliveryType;
       }
       const hadBarcode = !!(await this.barcodesService.findByOrder(id));
-      const barcode: any = await this.barcodesService.assignToOrder(id, resolvedType);
+      const barcode: any = await this.barcodesService.assignToOrder(
+        id,
+        resolvedType,
+      );
       if (barcode) {
         $set.trackingNumber = barcode.code;
         $set.barcodePending = false;
@@ -1649,7 +1911,10 @@ export class OrdersService {
     if (explicitTracking) $set.trackingNumber = explicitTracking;
 
     // Cancelling before dispatch frees what the order was holding.
-    if (status === OrderStatus.CANCELLED && previousStatus === OrderStatus.PACKED) {
+    if (
+      status === OrderStatus.CANCELLED &&
+      previousStatus === OrderStatus.PACKED
+    ) {
       $unset.trackingNumber = 1;
       $set.barcodePending = false;
     }
@@ -1668,8 +1933,16 @@ export class OrdersService {
             statusHistory: skippingDispatch
               ? {
                   $each: [
-                    { status: OrderStatus.DISPATCHED, at: now, note: opts.note ?? 'Marked delivered from barcode list' },
-                    { status, at: now, note: opts.note ?? 'Marked delivered from barcode list' },
+                    {
+                      status: OrderStatus.DISPATCHED,
+                      at: now,
+                      note: opts.note ?? 'Marked delivered from barcode list',
+                    },
+                    {
+                      status,
+                      at: now,
+                      note: opts.note ?? 'Marked delivered from barcode list',
+                    },
                   ],
                 }
               : { status, at: now },
@@ -1681,10 +1954,15 @@ export class OrdersService {
     if (!saved) {
       // Give back a barcode claimed for a transition that didn't happen.
       if (claimed) await this.barcodesService.releaseOne(claimed._id);
-      throw new ConflictException('This order changed while you were updating it — refresh and try again');
+      throw new ConflictException(
+        'This order changed while you were updating it — refresh and try again',
+      );
     }
 
-    if (status === OrderStatus.CANCELLED && previousStatus !== OrderStatus.CANCELLED) {
+    if (
+      status === OrderStatus.CANCELLED &&
+      previousStatus !== OrderStatus.CANCELLED
+    ) {
       // NEW/PACKED only (see ALLOWED_TRANSITIONS), so the stock is still out.
       await this.moveItemsStock(saved.items, +1);
       if (previousStatus === OrderStatus.PACKED) {
@@ -1747,9 +2025,7 @@ export class OrdersService {
 
       const coach = order.coachId || {};
       const kitName =
-        order.campaignId?.name ||
-        order.items?.[0]?.productId?.name ||
-        'order';
+        order.campaignId?.name || order.items?.[0]?.productId?.name || 'order';
 
       // Only the dispatch and delivered templates carry a media header. The
       // returned one has no header at all, and offering an image for a template
@@ -1779,12 +2055,84 @@ export class OrdersService {
         },
         { headerImageUrl },
       );
-      this.logger.log(`Sent the ${status} WhatsApp update for order ${orderId}`);
+      this.logger.log(
+        `Sent the ${status} WhatsApp update for order ${orderId}`,
+      );
     } catch (err) {
       this.logger.error(
         `Could not send the ${status} WhatsApp update for order ${orderId}: ${(err as Error).message}`,
       );
     }
+  }
+
+  /**
+   * Admin "Postal CSV" tool: the order behind each scanned barcode, populated
+   * as the pipeline's (tribe, campaign with its parcel spec, products) so the
+   * frontend can build the India Post booking CSV exactly as the pipeline's
+   * "Postal CSV" button does. Read-only. Only Ready to Ship orders are READY.
+   */
+  async lookupForPostalCsv(rawCodes: string[]): Promise<PostalScanRow[]> {
+    const codes = uniqueCodes(rawCodes);
+    if (codes.length > MAX_TRACKING_CODES) {
+      throw new BadRequestException(
+        `Up to ${MAX_TRACKING_CODES} different codes at a time — split the list`,
+      );
+    }
+    if (!codes.length) return [];
+    // Same matching as the Mark delivered tool: barcodes are stored uppercase,
+    // hand-typed numbers as typed — exact $in on both keeps the index.
+    const candidates = [
+      ...new Set([
+        ...codes,
+        ...rawCodes.map((r) => String(r ?? '').trim()).filter(Boolean),
+      ]),
+    ];
+    const orders: any[] = await this.orderModel
+      .find({
+        isDeleted: { $ne: true },
+        trackingNumber: { $in: candidates },
+      } as any)
+      .populate('coachId', 'name brand username')
+      .populate('items.productId', 'name sku customizationType')
+      .populate('campaignId', 'name type packageWeight length breadth height')
+      .lean()
+      .exec();
+
+    const byCode = new Map<string, any[]>();
+    for (const o of orders) {
+      const key = String(o.trackingNumber ?? '')
+        .trim()
+        .toUpperCase();
+      const list = byCode.get(key) ?? [];
+      if (!list.some((x) => String(x._id) === String(o._id))) list.push(o);
+      byCode.set(key, list);
+    }
+
+    return codes.map((code): PostalScanRow => {
+      const matches = byCode.get(code) ?? [];
+      if (!matches.length)
+        return { code, state: 'NOT_FOUND', order: null, matches: 0 };
+      if (matches.length > 1)
+        return {
+          code,
+          state: 'MULTIPLE',
+          order: null,
+          matches: matches.length,
+        };
+      const o = matches[0];
+      const state: PostalScanState =
+        o.approvalStatus === ApprovalStatus.PENDING
+          ? 'AWAITING_APPROVAL'
+          : o.status === OrderStatus.PACKED
+            ? 'READY'
+            : o.status === OrderStatus.NEW
+              ? 'NOT_PACKED'
+              : o.status === OrderStatus.DISPATCHED ||
+                  o.status === OrderStatus.DELIVERED
+                ? 'ALREADY_DISPATCHED'
+                : 'CLOSED';
+      return { code, state, order: o, matches: 1 };
+    });
   }
 
   /**
@@ -1798,7 +2146,9 @@ export class OrdersService {
    *   MULTIPLE          the code is on more than one order — left alone
    *   NOT_FOUND         no (non-deleted) order carries it
    */
-  async previewDeliverByTracking(rawCodes: string[]): Promise<TrackingDeliveryRow[]> {
+  async previewDeliverByTracking(
+    rawCodes: string[],
+  ): Promise<TrackingDeliveryRow[]> {
     const codes = uniqueCodes(rawCodes);
     if (codes.length > MAX_TRACKING_CODES) {
       throw new BadRequestException(
@@ -1809,18 +2159,28 @@ export class OrdersService {
     // Barcodes are stored uppercase; a hand-typed tracking number is stored as
     // typed (trimmed). Exact $in on both spellings keeps the trackingNumber index.
     const candidates = [
-      ...new Set([...codes, ...rawCodes.map((r) => String(r ?? '').trim()).filter(Boolean)]),
+      ...new Set([
+        ...codes,
+        ...rawCodes.map((r) => String(r ?? '').trim()).filter(Boolean),
+      ]),
     ];
     const orders: any[] = await this.orderModel
-      .find({ isDeleted: { $ne: true }, trackingNumber: { $in: candidates } } as any)
-      .select('trackingNumber status approvalStatus shippingAddress.fullName coachId type')
+      .find({
+        isDeleted: { $ne: true },
+        trackingNumber: { $in: candidates },
+      } as any)
+      .select(
+        'trackingNumber status approvalStatus shippingAddress.fullName coachId type',
+      )
       .populate('coachId', 'brand name')
       .lean()
       .exec();
 
     const byCode = new Map<string, any[]>();
     for (const o of orders) {
-      const key = String(o.trackingNumber ?? '').trim().toUpperCase();
+      const key = String(o.trackingNumber ?? '')
+        .trim()
+        .toUpperCase();
       const list = byCode.get(key) ?? [];
       if (!list.some((x) => String(x._id) === String(o._id))) list.push(o);
       byCode.set(key, list);
@@ -1836,14 +2196,16 @@ export class OrdersService {
         status: o.status,
         approvalStatus: o.approvalStatus ?? null,
       }));
-      if (matches.length > 1) return { code, state: 'MULTIPLE', orders: summary };
+      if (matches.length > 1)
+        return { code, state: 'MULTIPLE', orders: summary };
       const o = matches[0];
       const state: TrackingDeliveryState =
         o.status === OrderStatus.DELIVERED
           ? 'ALREADY_DELIVERED'
           : o.approvalStatus === ApprovalStatus.PENDING
             ? 'AWAITING_APPROVAL'
-            : o.status === OrderStatus.RETURNED || o.status === OrderStatus.CANCELLED
+            : o.status === OrderStatus.RETURNED ||
+                o.status === OrderStatus.CANCELLED
               ? 'CLOSED'
               : 'READY';
       return { code, state, orders: summary };
@@ -1862,9 +2224,15 @@ export class OrdersService {
     for (const row of rows) {
       if (row.state !== 'READY') continue;
       try {
-        await this.updateStatus(row.orders[0]._id, OrderStatus.DELIVERED, undefined, undefined, {
-          skipDispatch: true,
-        });
+        await this.updateStatus(
+          row.orders[0]._id,
+          OrderStatus.DELIVERED,
+          undefined,
+          undefined,
+          {
+            skipDispatch: true,
+          },
+        );
         row.state = 'DELIVERED';
         row.orders[0].status = OrderStatus.DELIVERED;
       } catch (err) {
@@ -1873,7 +2241,9 @@ export class OrdersService {
       }
     }
     const done = rows.filter((r) => r.state === 'DELIVERED').length;
-    this.logger.log(`Mark delivered by tracking: ${done} of ${rows.length} codes delivered`);
+    this.logger.log(
+      `Mark delivered by tracking: ${done} of ${rows.length} codes delivered`,
+    );
     return rows;
   }
 
@@ -1901,16 +2271,22 @@ export class OrdersService {
       const coach = order.coachId || {};
       await this.whatsapp.sendTemplateByIdTo(
         phone,
-        process.env.WHATSAPP_CLAIM_TEMPLATE_ID?.trim() || CLAIM_RECEIVED_TEMPLATE_ID,
+        process.env.WHATSAPP_CLAIM_TEMPLATE_ID?.trim() ||
+          CLAIM_RECEIVED_TEMPLATE_ID,
         {
           // Same values and fallbacks as the dispatch/delivered updates.
-          customer_name: titleCaseName(order.shippingAddress?.fullName) || 'there',
+          customer_name:
+            titleCaseName(order.shippingAddress?.fullName) || 'there',
           kit_name:
-            order.campaignId?.name || order.items?.[0]?.productId?.name || 'kit',
+            order.campaignId?.name ||
+            order.items?.[0]?.productId?.name ||
+            'kit',
           client_brand: coach.brand || coach.name || 'Tribe Merchandise',
         },
       );
-      this.logger.log(`Sent the claim confirmation WhatsApp for order ${orderId}`);
+      this.logger.log(
+        `Sent the claim confirmation WhatsApp for order ${orderId}`,
+      );
     } catch (err) {
       this.logger.error(
         `Could not send the claim confirmation WhatsApp for order ${orderId}: ${(err as Error).message}`,
@@ -1932,7 +2308,9 @@ export class OrdersService {
    * WhatsApp notification, and undoing a misclick must not message anyone.
    */
   async revertStatus(id: string, performedBy?: string): Promise<Order> {
-    const order = await this.orderModel.findOne({ _id: id, isDeleted: { $ne: true } } as any).exec();
+    const order = await this.orderModel
+      .findOne({ _id: id, isDeleted: { $ne: true } } as any)
+      .exec();
     if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
 
     const now = new Date();
@@ -1978,7 +2356,8 @@ export class OrdersService {
     }
 
     throw new BadRequestException(
-      order.status === OrderStatus.DISPATCHED || order.status === OrderStatus.DELIVERED
+      order.status === OrderStatus.DISPATCHED ||
+        order.status === OrderStatus.DELIVERED
         ? 'This parcel has already shipped — log a return instead of moving it back'
         : `A ${order.status.toLowerCase()} order has no earlier stage to move back to`,
     );
@@ -1992,11 +2371,12 @@ export class OrdersService {
     const order = await this.orderModel.findById(id).exec();
     if (!order) throw new NotFoundException(`Order with ID ${id} not found`);
     if (order.status !== OrderStatus.NEW) {
-      throw new BadRequestException('Delivery type can only be changed before the order is dispatched');
+      throw new BadRequestException(
+        'Delivery type can only be changed before the order is dispatched',
+      );
     }
     if (order.deliveryType === newType) return order;
     order.deliveryType = newType;
     return order.save();
   }
 }
-
